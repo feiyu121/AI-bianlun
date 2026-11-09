@@ -1,5 +1,6 @@
 import {connect} from './api.js';
 import {Speaker} from './speaker.js';
+import {captionAt} from './captions.js';
 const $=id=>document.getElementById(id),params=new URLSearchParams(location.search),preview=params.has('preview');
 let data,avatars=[];
 function fit(){const scale=Math.min(innerWidth/540,innerHeight/960);$('stage').style.transform=`translate(${(innerWidth-540*scale)/2}px,${(innerHeight-960*scale)/2}px) scale(${scale})`;}
@@ -8,6 +9,11 @@ const speaker=new Speaker((enabled,message)=>{$('sound-toggle').textContent=enab
 $('sound-toggle').onclick=()=>speaker.enabled?speaker.disable():speaker.enable().catch(error=>$('sound-status').textContent=error.message);
 if(preview)$('scene-controls').hidden=true;
 function element(tag,text){const el=document.createElement(tag);el.textContent=text;return el;}
+function paintCaption(){
+  const line=data?.state.scriptLine;
+  const text=line?captionAt(line.text,Date.now()-line.at,line.durationMs):'观点可以不同，道理值得讲清楚。';
+  if($('scene-line').textContent!==text)$('scene-line').textContent=text;
+}
 function render(next){
   data=next;if(!preview)speaker.update(next);
   const {script,cycle,config,playback}=next;
@@ -22,11 +28,11 @@ function render(next){
   $('scene-track').style.width=(script.total?script.index/script.total*100:0)+'%';
   const line=next.state.scriptLine;
   $('scene-speaker').textContent=line?.side==='B'?nameB:line?nameA:'辩';
-  $('scene-line').textContent=line?.text||'观点可以不同，道理值得讲清楚。';$('scene-line').classList.toggle('long',(line?.text.length||0)>120);
+  paintCaption();
   const talking=playback.text?playback.speaker:script.active&&!script.paused?next.state.speakingSide:'';
   for(const side of ['A','B'])$('side-'+side.toLowerCase()).dataset.speaking=String(talking===side);
   for(const [side,key]of [['A','a'],['B','b']]){
-    const stance=script.sides?.find(x=>x.id===side)?.stance||'';$('stance-'+key).textContent=stance||(side==='A'?'用证据与推理，把问题拆开。':'从具体的人，找到另一种答案。');
+    const stance=script.sides?.find(x=>x.id===side)?.stance||'';$('stance-'+key).textContent=stance||(side==='A'?'嘴上不饶人，也会心软和改口。':'慢悠悠补刀，也会被逗笑。');
   }
   const wall=script.wall.slice(-3);$('scene-wall').replaceChildren(...(wall.length?wall.map(row=>{const div=element('div','');div.className='wall-row';div.dataset.state=row.state;div.append(element('b',row.name),element('span',row.text),element('small',row.state==='replied'?'已回应':row.state==='heard'?'已听见':''));return div;}):[Object.assign(element('p','发出你的观点，让现场听见。'),{className:'wall-empty'})]));
   const receipt=[...script.receipts].reverse().find(row=>row.kind!=='bubble'&&Date.now()-row.at<6500);
@@ -56,6 +62,7 @@ loadAvatars();
 let time=0,last=performance.now();
 function frame(now){
   const dt=Math.min(.1,(now-last)/1000);last=now;time+=dt;
+  paintCaption();
   if(data){const playback=data.playback,side=playback.text?playback.speaker:data.script.active&&!data.script.paused?data.state.speakingSide:'';for(const avatar of avatars){try{const active=side===avatar.side;avatar.renderer.playEmotion(active?({focus:'neutral',question:'surprised',smug:'happy'}[playback.emotion]||playback.emotion||'neutral'):'neutral');avatar.renderer.frame(time,active?(speaker.level||playback.level||.12):0);}catch{}}}
   requestAnimationFrame(frame);
 }

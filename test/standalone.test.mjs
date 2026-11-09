@@ -10,6 +10,7 @@ import {DebateCycle} from '../lib/debate-cycle.mjs';
 import {LLMClient} from '../lib/llm-client.mjs';
 import {CloudVoice} from '../lib/cloud-voice.mjs';
 import {estimateDuration} from '../lib/speech.mjs';
+import {ScriptWriter} from '../lib/script/writer.mjs';
 
 const root=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'..');
 const sample=()=>({topic:'加班应该如何安排',turns:[{side:'A',act:1,text:'先把工作目标讲清楚。',reaction:true},{side:'B',act:2,text:'也要考虑完成目标的代价。',reaction:true}]});
@@ -19,6 +20,43 @@ async function until(check){const deadline=Date.now()+2000;while(!check()){asser
 async function runtime(t,options={}){const dataDir=await temporary(t);const app=await new DebateRuntime({root,dataDir,platformEnabled:false,edgeSpeech:async()=>({ok:true}),edgeStatus:()=>({available:true}),renderVoice:async()=>({url:'/audio/mock.mp3',durationMs:30000}),...options}).init();teardown.set(dataDir,()=>app.close());return app;}
 
 test('长句按完整字数估时，不截断为 20 秒',()=>{assert.ok(estimateDuration('辩'.repeat(150))>30000);});
+test('相爱相杀短样稿可通过播出检查，默认名和点名路由使用肉包',async t=>{
+ const app=await runtime(t),demo=JSON.parse(await readFile(path.join(root,'public/demo.json'),'utf8'));
+ const script=validateScript(demo,app.safety);assert.equal(script.turns.length,6);
+ app.startSingle({script});await until(()=>app.runner.active);
+ assert.equal(app.runner.side('A').name,'肉包');
+ assert.match(app.runner.side('A').relationship,/肉包和鲸鱼娘是相爱相杀/);
+ const mention=app.runner.comment({name:'观众',userId:'rename-test',text:'肉包你怎么看'});
+ assert.equal(mention.routed,'mention');assert.equal(mention.item.personaId,'A');
+ await app.stop();
+});
+test('准备剧本只创建一次人物状态，共用准备任务并保存同一状态',async t=>{
+ const app=await runtime(t);let count=0,seenSides;
+ const original=app.sides.bind(app);app.sides=topic=>{count++;return original(topic);};
+ t.mock.method(ScriptWriter.prototype,'write',async function(){seenSides=this.sides;await new Promise(resolve=>setImmediate(resolve));return {...sample(),sides:this.sides,meta:{personaVersion:2}};});
+ const topic=app.topic('slack');
+ const [first,second]=await Promise.all([app.prepare(topic),app.prepare(topic)]);
+ assert.equal(count,1);assert.equal(first,second);assert.deepEqual(first.script.sides,seenSides);
+ const saved=await app.loadScript(first.script.id);
+ assert.deepEqual(saved.sides,seenSides);assert.equal(saved.meta.personaVersion,2);
+});
+test('导入播放和互动沿用保存的人物，重写不重新抽取状态',async t=>{
+ const calls=[];const app=await runtime(t,{llm:{view:()=>({hasKey:true}),complete:async messages=>{calls.push(messages);return '你说得对，这个条件我刚才没有认真想过。';}}});
+ const sides=app.sides(app.topic('slack')).map(side=>({...side,scene:'本场虚构状态：想再听对方解释一次'}));
+ const script=sample();script.sides=sides;
+ const clean=validateScript(script,app.safety);
+ for(let i=0;i<2;i++)for(const field of ['style','relationship','scene','backstory'])assert.equal(clean.sides[i][field],sides[i][field]);
+ app.startSingle({script:clean});await until(()=>app.runner.active);
+ for(let i=0;i<2;i++)for(const field of ['style','relationship','scene','backstory'])assert.equal(app.runner.sides[i][field],sides[i][field]);
+ for(const kind of ['reaction','mention','gift'])await app.draft(kind,{name:'观众',text:'这里的条件要不要再想想',label:'墨镜',count:1},app.runner.turns[0],'A');
+ for(const messages of calls){assert.ok(messages[0].content.includes(sides[0].scene));assert.ok(messages[0].content.includes(sides[0].relationship));}
+ let rewrittenSides;
+ t.mock.method(ScriptWriter.prototype,'write',async function(){rewrittenSides=this.sides;return {turns:[{side:'B',text:'这个条件我愿意重新想想。'}]};});
+ const result=await app.rewrite(2);
+ assert.equal(result.ok,true);assert.deepEqual(rewrittenSides,app.runner.sides);
+ assert.equal(app.runner.turns.find(turn=>turn.act===2).text,'这个条件我愿意重新想想。');
+ await app.stop();
+});
 test('导入只接受有效台词，清除音频、伪造时长和外部运行配置',()=>{
   const script=sample();Object.assign(script,{topicRef:{unsafe:true},sides:'wrong'});Object.assign(script.turns[0],{audio:'https://example.com/a.mp3',durationMs:1,estSec:9999});
   const clean=validateScript(script);assert.equal(clean.turns[0].audio,undefined);assert.equal(clean.turns[0].durationMs,undefined);assert.ok(clean.turns[0].estSec<10);assert.equal(clean.topicRef,undefined);assert.deepEqual(clean.sides,[]);
@@ -35,10 +73,24 @@ test('运行失败释放场次状态，不会锁死工作台',async t=>{
   const app=await runtime(t);app.startSingle({topicId:'missing'});await app.task;
   assert.equal(app.operation.state,'error');assert.equal(app.busy,false);assert.equal(app.engine.state.running,false);assert.equal(app.cycle.running,false);
 });
-test('L0 社交回应无需模型即可命中，已接上运行时舞台',async t=>{
+test('无模型时社交弹幕上墙，不循环播放三句固定人设台词',async t=>{
   const app=await runtime(t);app.startSingle({script:sample()});await until(()=>app.runner.active);
   app.runner.stage.hear({userId:'praise',name:'观众',text:'哈哈哈哈'});
-  const hit=app.runner.stage.advance(Infinity).find(row=>row.kind==='reply');assert.ok(hit);assert.match(hit.layer,/L0/);assert.ok(hit.text.length>10);await app.stop();
+  const hits=app.runner.stage.advance(Infinity);assert.ok(hits.some(row=>row.kind==='bubble'));assert.equal(hits.some(row=>row.kind==='reply'),false);await app.stop();
+});
+test('写好的临场回复不是已播记忆，已播历史会传给接话和重写，下一场重新开始',async t=>{
+ const calls=[];const app=await runtime(t,{renderVoice:async item=>({url:'/audio/mock.mp3',durationMs:item.text===sample().turns[0].text?1:30000}),llm:{view:()=>({hasKey:true}),complete:async messages=>{calls.push(messages);return '行吧。';}}});
+ const first=sample();first.turns.push({side:'A',act:3,text:'还没开始的收尾。'});
+ app.startSingle({script:first});await until(()=>app.memory.entries.length===1);
+ const history=app.memory.snapshot();assert.equal(history.history[0].text,sample().turns[0].text);
+ assert.ok(!JSON.stringify(history).includes(sample().turns[1].text),'未说完的下一句不能提前进入记录');
+ const text=await app.draft('reaction',{text:'哈哈哈哈',social:true},null,'A');assert.equal(text,'行吧。');
+ assert.ok(calls[0][0].content.includes(sample().turns[0].text));assert.equal(app.memory.entries.length,1);
+ let seed;
+ t.mock.method(ScriptWriter.prototype,'write',async function(){seed=this.seedMemory.snapshot();return {turns:[{side:'A',text:'我记得刚才的话。'}]};});
+ const rewritten=await app.rewrite(3);assert.equal(rewritten.ok,true);assert.deepEqual(seed,history);
+ await app.stop();const second=sample();second.turns[0].text='另一场的开场。';
+ app.startSingle({script:second});await until(()=>app.runner.active);assert.equal(app.memory.entries.length,0);await app.stop();
 });
 test('投票期普通弹幕继续进入聊天，有效数字票只进票箱',async t=>{
   const calls=[];const app=await runtime(t,{llm:{view:()=>({hasKey:true}),complete:async messages=>{calls.push(messages);return '这个角度有意思，留到下一场好好说。';}}});
@@ -68,6 +120,17 @@ test('全局模型请求最多两个并发，队列任务可取消',async t=>{
   const abort=new AbortController(),pending=Array.from({length:6},(_,i)=>client.complete([],{signal:i===5?abort.signal:undefined}));
   const cancelled=assert.rejects(pending[5]);abort.abort();await cancelled;assert.equal(client.view().apiKey,undefined);
   for(let i=0;i<5;i++){await until(()=>releases.length);releases.shift()();}await Promise.all(pending.slice(0,5));assert.equal(max,2);assert.equal(client.active,0);assert.equal(client.waiters.length,0);
+});
+test('推理耗尽输出预算时只重试一次，不把截断台词当完整结果',async t=>{
+ const dataDir=await temporary(t),budgets=[];let count=0;
+ const client=new LLMClient({dataDir,fetcher:async(_url,options)=>{
+  budgets.push(JSON.parse(options.body).max_tokens);count++;
+  return {ok:true,json:async()=>({usage:{completion_tokens_details:{reasoning_tokens:390}},choices:[{finish_reason:count===1?'length':'stop',message:{content:count===1?'[{"side":"A","text":"没写完':'行吧。'}}]})};
+ }});client.config={baseUrl:'https://example.com/v1',apiKey:'test',model:'reasoning-test'};
+ assert.equal(await client.complete([],{maxTokens:400}),'行吧。');assert.equal(count,2);assert.ok(budgets[1]>budgets[0]);
+ await client.complete([],{maxTokens:400});assert.ok(budgets[2]>400,'后续请求给已识别的推理模型预留空间');
+ count=0;client.fetcher=async()=>{count++;return {ok:true,json:async()=>({choices:[{finish_reason:'length',message:{content:'没说完'}}]})};};
+ await assert.rejects(client.complete([]),/被截断/);assert.equal(count,2);
 });
 test('云端语音要求双方配置不同音色，排队合成响应取消',async t=>{
   const dataDir=await temporary(t);await mkdir(path.join(dataDir,'audio'));let started;

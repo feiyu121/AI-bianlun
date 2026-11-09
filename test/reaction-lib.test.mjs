@@ -45,7 +45,7 @@ test('跨方去重：同一句要挡，同一个开头不挡',()=>{
 
 test('社交库：校验丢掉的句子要补写，直到写满',async()=>{
  const first=['夸我没用，我今天是来算账的','笑得这么齐，心里都有数','嘘我也得说，这话我不收回',
-  '夸我没用，我今天是来算账的','摸鱼这事我不让','这是一句特别长的社交接话，十六个字根本装不下'];
+  '夸我没用，我今天是来算账的','摸鱼这事我不让','超长缓存内容'.repeat(20)];
  const second=['起哄归起哄，我照旧这么讲','怕你们笑，我更得把话说完','你们越喊，我越站得住'];
  const fake=server(JSON.stringify(first),JSON.stringify(second));
  const lib=new ReactionLibrary({sides:[A],complete:fake.complete,rng:seeded()});
@@ -58,7 +58,7 @@ test('社交库：校验丢掉的句子要补写，直到写满',async()=>{
 });
 
 test('社交库：三次都写不满就停手，不无限重试',async()=>{
- const fake=server('["太短","也短"]','[]','[]');
+ const fake=server('["我是一个AI","谢谢你的支持"]','[]','[]');
  const lib=new ReactionLibrary({sides:[A],complete:fake.complete});
  const total=await lib.buildSocial({count:10,attempts:3});
  assert.equal(total,0);
@@ -137,6 +137,7 @@ test('落盘：重启不重花钱，版本不一致就作废',async()=>{
   const stale=new ReactionLibrary({sides:[A],dir});
   assert.equal(stale.fromJSON({version:LIB_VERSION+1,sides:{A:{social:['旧句子'],ask:[]}}}),false,'版本一变旧库就不该再用');
   assert.equal(stale.snapshot().sides.A.social,0);
+  assert.equal(stale.fromJSON({version:2,sides:{A:{social:['旧的温和风格回应'],ask:[]}}}),false,'相爱相杀升级后不复用旧人物缓存');
  }finally{
   await rm(dir,{recursive:true,force:true});
  }
@@ -146,4 +147,9 @@ test('没有 dir 时不落盘，也不报错',async()=>{
  const lib=new ReactionLibrary({sides:[A]});
  assert.equal(await lib.save(),false);
  assert.equal(await lib.load(),false);
+});
+test('现场备用缓存每条只说一次，用尽后不循环套话',()=>{
+ const lib=new ReactionLibrary({sides:[A]});lib.bank('A').social=['嗯。','谢啦。','先听她说。'];
+ const used=Array.from({length:3},()=>lib.pick('A',{once:true}));
+ assert.equal(new Set(used).size,3);assert.equal(lib.pick('A',{once:true}),null);assert.equal(lib.pick('A',{once:true}),null);
 });

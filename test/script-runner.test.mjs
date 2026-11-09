@@ -40,7 +40,7 @@ function fakeVoice({ms=20_000,fail=null}={}){
 // 这样「播到一半停下来」的用例（暂停、中途入池的弹幕）才有确定的时间点。
 function make({n=4,voice=null,lookahead=2,prewarm=2,script=null,voiceExpected=()=>false,draft=null,
  mention=false,mentionDraft=null,mentionLimits={},actOf=i=>1,
- gifts=false,giftDraft=null,giftLimits={}}={}){
+ gifts=false,giftDraft=null,giftLimits={},onSpoken=()=>{}}={}){
  const engine=new Engine({safety:defaultSafety,saved:{config:{characterName:'肉包'}}});
  let clock=BASE;
  const pending=[];
@@ -68,6 +68,7 @@ function make({n=4,voice=null,lookahead=2,prewarm=2,script=null,voiceExpected=()
   mentionDraft,
   gifts:giftQueue,
   giftDraft,
+  onSpoken,
   onChange:()=>{},
   onEnd:()=>{}
  });
@@ -118,6 +119,12 @@ test('空档：脚本是提前写好的，句与句之间不该有任何等待',
  assert.equal(stats.maxGap,0,'真实时钟里每一句都准时接上，空档只能是 0');
  assert.equal(stats.starved,0);
  assert.equal(stats.rhythm,'ok');
+});
+test('对话记忆只收到实际说完的台词，预读和中途停止不会记录未来',async()=>{
+ const heard=[];const {runner,step}=make({n:3,onSpoken:(turn,{kind})=>heard.push({text:turn.text,kind})});
+ await runner.start();await flush();assert.equal(heard.length,0);
+ await step();assert.equal(heard.length,1);assert.equal(heard[0].kind,'script');assert.match(heard[0].text,/第0句/);
+ runner.stop();await runner.running;assert.equal(heard.length,1);
 });
 
 test('预热 + 预读：开播前先合成前两句，播到中段时后面几句也已备好',async()=>{

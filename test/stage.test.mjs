@@ -88,16 +88,22 @@ test('L1 命中：弹幕早进池，到点时早就写好了',()=>{
  assert.equal(hit.text,'这题我不让，你们老板');
  assert.equal(hit.latencyMs,1000);
 });
+test('夸奖和笑声优先临场生成，命中模型结果时不取固定回应',()=>{
+ const seen=[];const {stage}=fixture({n:1,draft:item=>{seen.push(item.text);return '你这声笑是在替她接梗吧。';},library:{pick(){throw new Error('已写好回复不应走固定库');}}});
+ stage.hear(comment(1,'主播声音好好听'));
+ const [hit]=stage.advance(BASE+27000);
+ assert.equal(seen.length,1);assert.equal(hit.layer,'L1');assert.equal(hit.text,'你这声笑是在替她接梗吧。');
+});
 
-test('赶不上就降 L0：位置前 3 秒才来的弹幕，现场生成必然来不及',()=>{
+test('有实质问题但没写好时只上墙，不播放无关的通用句',()=>{
  const {stage,box}=fixture({n:1,genMs:()=>30000,library:fakeLibrary({A:['预渲染的兜底句'],B:[]})});
  box.clock=BASE+25000;                 // 位置在 27000，只剩 2 秒
  stage.hear(comment(1,'你们是不是收钱了'));
  const [hit]=stage.advance(BASE+27000);
- assert.equal(hit.layer,'L0-degrade');
- assert.equal(hit.text,'预渲染的兜底句');
+ assert.equal(hit.kind,'bubble');
+ assert.equal(hit.text,undefined);
  assert.equal(stage.stats.lapsed,1);
- assert.equal(stage.stats.degraded,1);
+ assert.equal(stage.stats.degraded,0);
 });
 
 test('库也空了就走气泡，且这一条当场作废——不能下一格再念一遍',()=>{
@@ -108,6 +114,7 @@ test('库也空了就走气泡，且这一条当场作废——不能下一格�
  assert.equal(stage.stats.bubble,1);
  assert.equal(stage.router.pool.size,0,'作废后不回池');
  assert.equal(stage.router.stats.dropped,1);
+ assert.equal(stage.jobs.size,0,'未出声的终止任务也应释放');
  const replies=stage.advance(Infinity);
  assert.equal(replies.length,0);
 });
@@ -116,8 +123,8 @@ test('生成抛错不往上冒：当成没写出来，直接降级',()=>{
  const {stage}=fixture({n:1,genMs:()=>1000,draft:()=>{throw new Error('模型 502')},library:fakeLibrary({A:['兜底这一句'],B:[]})});
  stage.hear(comment(1,'摸鱼就是偷时间'));
  const [hit]=stage.advance(BASE+27000);
- assert.equal(hit.layer,'L0-degrade');
- assert.equal(hit.text,'兜底这一句');
+ assert.equal(hit.kind,'bubble');
+ assert.equal(hit.text,undefined);
 });
 
 test('接话时间只加不减：接几条就把整场拉长几个 3.5 秒',()=>{
@@ -165,7 +172,7 @@ test('生成慢过 12 秒就不要了：迟到的回复等于答非所问',()=>{
  const {stage}=fixture({n:1,genMs:()=>20000,library:fakeLibrary({A:['库里的兜底句'],B:[]})});
  stage.hear(comment(1,'你们老板同意吗'));
  const [hit]=stage.advance(BASE+27000);
- assert.equal(hit.layer,'L0-degrade','赶不上的不排队，直接给现成的');
+ assert.equal(hit.kind,'bubble','赶不上的不排队，不用通用句冒充回答');
  assert.equal(stage.stats.slow,1,'慢到超线的要单独记账，否则看不出模型在排队');
 });
 
@@ -175,7 +182,7 @@ test('跨幕生成作废：写在第 2 幕、播在第 3 幕，不能用',()=>{
  const item={userId:'u1',name:'甲',text:'你们老板同意吗',social:false};
  stage.schedule(item,{act:2,side:'A'});
  const route=stage.route(item,{act:3,side:'A'},stage.startedAt+60000);
- assert.equal(route.layer,'L0-degrade');
+ assert.equal(route.layer,'L2');
  assert.equal(stage.stats.stale,1);
 });
 

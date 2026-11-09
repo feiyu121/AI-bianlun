@@ -49,7 +49,21 @@ try{
   await page.goto(base+'/scene.html?preview=1');
   await page.locator('#avatar-a[data-ready=true]').waitFor({timeout:60000});await page.locator('#avatar-b[data-ready=true]').waitFor({timeout:60000});
   await page.setViewportSize({width:540,height:960});
+  assert.match(await page.locator('.side-a .debater-label span').innerText(),/嘴硬心软/);
+  assert.match(await page.locator('.side-b .debater-label span').innerText(),/温柔补刀/);
+  assert.equal(await page.locator('#scene-name-a').innerText(),'肉包');
   await page.screenshot({path:path.join(output,'scene.png')});
+  const longText='这是用来检查长句字幕是否完整显示的内容，我们可以慢慢把一个条件说清楚。'.repeat(8).slice(0,260);
+  const captions=await import('../public/captions.js'),pages=captions.captionPages(longText);
+  let consumed=0;
+  for(const text of pages){
+    app.runtime.engine.state.scriptLine={side:'A',text:longText,at:Date.now()-(consumed+1)*1000,durationMs:longText.length*1000};app.runtime.emit();
+    await page.waitForFunction(text=>document.getElementById('scene-line').textContent===text,text);
+    const box=await page.locator('#scene-line').evaluate(el=>({visible:el.clientHeight,full:el.scrollHeight,bottom:el.getBoundingClientRect().bottom,container:el.closest('.dialogue').getBoundingClientRect().bottom}));
+    assert.ok(box.full<=box.visible+1,'每页字幕应完整显示');assert.ok(box.bottom<=box.container,'字幕不能溢出对话框');
+    consumed+=text.length;
+  }
+  await page.screenshot({path:path.join(output,'scene-long-caption.png')});
   assert.deepEqual(errors,[]);
   await writeFile(path.join(output,'scene-check.json'),JSON.stringify({ok:true,result,errors},null,2));
   console.log(JSON.stringify({ok:true,result,errors},null,2));

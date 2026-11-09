@@ -3,7 +3,8 @@
 // 验的是「结构不许错」：幕数、句数、反应位标记、丢句规则、重写触发、块间传原话。
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {ACTS,ScriptWriter,repairLine,validateLine,similarity,estSeconds,buildRefineMessages} from '../lib/script/writer.mjs';
+import {ACTS,ScriptWriter,repairLine,validateLine,similarity,estSeconds,buildRefineMessages,LINE_LIMITS,isRedundant} from '../lib/script/writer.mjs';
+import {PERSONA_VERSION} from '../lib/personas.mjs';
 
 const SIDES=[
  {id:'A',name:'肉包',stance:'摸鱼是把被切碎的时间拼回来',points:['时间被切碎','把休息当罪才浪费']},
@@ -77,8 +78,8 @@ test('时长按字数估：140 字 ≈ 29 秒，全稿落在 28~31 分钟',async
  assert.ok(Math.abs(script.meta.deviation)<0.1);
 });
 
-test('不能播的整句丢掉、括号旁白只删词：空句、认同对手、口头禅',async()=>{
- const bad=['', '（笑）我可以再说两句', '你说得对，这点我认', '这句我不接'];
+test('不可播内容丢弃，旁白剥除，局部认同保留',async()=>{
+ const bad=['', '（笑）我可以再说两句', '你说得对，这点我认', '我是一个AI'];
  let call=0;
  const writer=new ScriptWriter({
   complete:async messages=>{
@@ -92,13 +93,14 @@ test('不能播的整句丢掉、括号旁白只删词：空句、认同对手�
  const script=await writer.write({});
  // 11 幕各留 1 句；「（笑）我可以再说两句」是删掉括号后留下的第 12 句——
  // 旁白是修辞不是内容，删掉它这句话还能说，整句丢掉是浪费。
- assert.ok(script.turns.length>=ACTS.length&&script.turns.length<=ACTS.length+1,`实际 ${script.turns.length}`);
- assert.ok(script.turns.every(turn=>!/你说得对|我不接|【|（/.test(turn.text)),'坏句必须一句不剩');
+ assert.ok(script.turns.length>=ACTS.length,`实际 ${script.turns.length}`);
+ assert.ok(script.turns.some(turn=>turn.text.includes('你说得对')));
+ assert.ok(script.turns.every(turn=>!/我是一个AI|【|（/.test(turn.text)),'坏句必须一句不剩');
  assert.ok(script.turns.some(turn=>turn.text==='我可以再说两句'),'括号旁白是删掉，不是丢整句');
 });
 
 test('跨幕消重：同一段话第二次出现就丢',async()=>{
- const {writer}=make({dup:['交锋一 · 定义与前提','交锋二 · 成本与代价']});
+ const {writer}=make({dup:['展开 · 1','展开 · 2']});
  const script=await writer.write({});
  assert.ok(script.meta.duplicates>=2,`重复计数 ${script.meta.duplicates}`);
  assert.ok(script.turns.length<59);
@@ -117,7 +119,7 @@ test('大纲整段失败就用内置骨架，稿子照样写得出来',async()=>
 });
 
 test('一幕写不够句数就重写一次，第二次提示里点名上一版不合格',async()=>{
- const {writer,box}=make({short:label=>label==='立论 A'});
+ const {writer,box}=make({short:label=>label==='接着聊 · 1'});
  const script=await writer.write({});
  assert.equal(script.meta.retried,1);
  const retry=box.calls.filter(call=>call.system.includes('上一次写的不合格'));
@@ -131,61 +133,61 @@ test('块与块之间传真实原话：第二块第一幕能看到上一块最�
  // 这里显式写死 3：块边界决定了「谁拿得到原话」，跟着默认并发改动会让这条测试失去意义。
  const {writer,box}=make({writer:{concurrency:3}});
  await writer.write({});
- const clash1=box.calls.find(call=>call.data.本幕==='交锋一 · 定义与前提');
- assert.ok(clash1.system.includes('上一幕最后两句'),'块首那一幕必须带原话');
+ const clash1=box.calls.find(call=>call.data.本幕==='展开 · 1');
+ assert.ok(clash1.system.includes('上一幕最后几句'),'块首那一幕必须带原话');
  // 同一块里的第二幕拿不到（并发时它还没写完），这是已知的取舍，不是 bug
- const sum1=box.calls.find(call=>call.data.本幕==='小结一 · 半场复盘与票数');
- assert.ok(!sum1.system.includes('上一幕最后两句'));
+ const sum1=box.calls.find(call=>call.data.本幕==='幕间 · 1');
+ assert.ok(!sum1.system.includes('上一幕最后几句'));
 });
 
 test('单幕失败不拖垮整场：那一幕空着，别的照写',async()=>{
- const {writer}=make({fail:data=>data.本幕==='交锋三 · 案例对决'});
+ const {writer}=make({fail:data=>data.本幕==='展开 · 3'});
  const script=await writer.write({});
  assert.equal(script.acts.find(act=>act.id==='clash3'),undefined);
  assert.ok(script.turns.length>40);
  assert.equal(script.turns.some(turn=>turn.act===7),false,'失败那一幕一句都不该有');
 });
 
-test('首句说反了就把那句丢掉，不硬翻边',async()=>{
+test('默认不分配谁先开口，B 起话也保留',async()=>{
  const writer=new ScriptWriter({
   complete:async messages=>{
    const data=JSON.parse(messages[1].content);
    if(!data.本幕)return '{}';
-   if(data.本幕!=='立论 A')return JSON.stringify([{side:'A',text:line(1)},{side:'B',text:line(2)},{side:'A',text:line(3)}]);
-   // 立论 A 应该 A 先说，这里故意先说 B
+   if(data.本幕!=='接着聊 · 1')return JSON.stringify([{side:'A',text:line(1)},{side:'B',text:line(2)},{side:'A',text:line(3)}]);
+   // 接着聊 · 1 应该 A 先说，这里故意先说 B
    return JSON.stringify([{side:'B',text:line(9)},{side:'A',text:line(10)},{side:'B',text:line(11)}]);
   },
   sides:SIDES,topic:'题'
  });
  const script=await writer.write({});
  const act2=script.turns.filter(turn=>turn.act===2);
- assert.equal(act2[0].side,'A');
- assert.ok(!act2.some(turn=>turn.text===line(9)),'说反的那句被丢了');
+ assert.equal(act2[0].side,'B');
+ assert.ok(act2.some(turn=>turn.text===line(9)),'自然起话不应丢句');
 });
 
 test('repairLine：括号旁白删掉、超长按句号收尾',()=>{
  assert.equal(repairLine('（笑）这是一句话。').text,'这是一句话。');
  const long='第一句。'.repeat(60);
  const fixed=repairLine(long).text;
- assert.ok(fixed.length<=185);
+ assert.ok(fixed.length<=LINE_LIMITS.maxChars);
  assert.ok(fixed.endsWith('。'));
 });
 
-test('validateLine：太短和没接对方只记账，格式和认输才丢',()=>{
+test('validateLine：自然短答与局部认同通过，无需固定引用词',()=>{
  const prev='工资买的是一段时间的注意力，不是你坐在那儿的时长';
  assert.equal(validateLine('',{}).ok,false);
  assert.equal(validateLine('【注】这句有括号',{}).ok,false);
- assert.equal(validateLine('你说得对，我认',{}).ok,false);
+ assert.equal(validateLine('你说得对，我认',{}).ok,true);
  const short=validateLine('嗯，是这样。',{prev});
  assert.equal(short.ok,true);
- assert.ok(short.soft.includes('太短'));
+ assert.deepEqual(short.soft,[]);
  const loose=validateLine(line(3).replace('你刚才那句','我当时那句话'),{prev});
- assert.ok(loose.soft.includes('没接对方'),'没有标记也没有重合，应判没接住');
+ assert.deepEqual(loose.soft,[],'不靠词面重合强制使用固定接话句式');
  const hit=validateLine('你刚才说注意力，我倒觉得这词本身就有问题',{prev});
  assert.ok(!hit.soft.includes('没接对方'));
 });
 
-test('扩写：句子太短就整块补一次，钩子丢了的不收',async()=>{
+test('扩写：内容不足时补充有展开空间的发言',async()=>{
  const short=[
   {side:'A',text:'你刚才那句我觉得不对，八小时被切碎这件事你根本没算过。'},
   {side:'B',text:'工资买的是一段时间里的注意力，你把它说成本事就是在偷换。'}
@@ -209,15 +211,15 @@ test('扩写：句子太短就整块补一次，钩子丢了的不收',async()=>
  assert.ok(added>0);
 });
 
-test('扩写：把句首钩子删掉的版本不要',async()=>{
+test('扩写：含义衔接保留即可，允许改变句首钩子',async()=>{
  const short=[{side:'A',text:'你刚才那句我觉得不对，八小时被切碎这件事你根本没算过，谁替你把碎片拼回来。'}];
  const writer=new ScriptWriter({
   complete:async()=>JSON.stringify([{i:0,text:'八小时被切碎这件事你根本没算过，谁替你把碎片拼回来，说得好像整块时间是天上掉的，你算过没有，我算过。'}]),
   sides:SIDES,topic:'题'
  });
  await writer.refineGroup(short);
- assert.equal(short[0].text.startsWith('你刚才那句'),true,'钩子丢了就退回原句');
- assert.equal(writer.stats.refined,0);
+ assert.equal(short[0].text.startsWith('八小时'),true,'可以调整措辞');
+ assert.equal(writer.stats.refined,1);
 });
 
 test('扩写提示词：序号照抄输入，句数和说话人都要带上',()=>{
@@ -225,4 +227,61 @@ test('扩写提示词：序号照抄输入，句数和说话人都要带上',()=
  const rows=JSON.parse(messages[1].content);
  assert.deepEqual(rows.map(row=>row.i),[0,1]);
  assert.deepEqual(rows.map(row=>row.who),['肉包','鲸鱼娘']);
+});
+
+test('默认逐幕承接前一幕真实原话，人物完整写入剧本',async()=>{
+ const sides=SIDES.map(side=>({...side,style:'会认真想，也愿意认错',relationship:'熟悉的搭档',scene:'本场虚构状态：有些犹豫'}));
+ const {writer,box}=make({writer:{sides}});
+ const script=await writer.write();
+ const acts=box.calls.filter(call=>call.data.本幕);
+ assert.equal(acts.length,ACTS.length);
+ for(let i=1;i<acts.length;i++){
+  const previous=script.turns.filter(turn=>turn.act===i).at(-1);
+  assert.ok(acts[i].system.includes(previous.text),'下一幕应看见前一幕最后一句');
+  for(const field of ['style','relationship','scene'])assert.ok(acts[i].system.includes(sides[0][field]));
+ }
+ assert.deepEqual(script.sides.map(({style,relationship,scene})=>({style,relationship,scene})),sides.map(({style,relationship,scene})=>({style,relationship,scene})));
+ assert.equal(script.meta.personaVersion,PERSONA_VERSION);
+ assert.ok(acts.at(-1).system.includes(script.turns[0].text),'尾声仍能看到开场留下的话，而非只保留最后四句');
+});
+
+test('回扣旧话并增加新结论不会被文字消重误删',async()=>{
+ const anchor='你当时说只要把工作做完就行，可后来连交接的时间也省了，留下的人总得知道下一步怎么办。';
+ const callback=anchor+'现在我把交接清单也补上了，你是不是可以放心一起走了？';
+ assert.equal(isRedundant(anchor,anchor),true);assert.equal(isRedundant(callback,anchor),false);
+ const writer=new ScriptWriter({sides:SIDES,retries:0,complete:async messages=>{
+  const data=JSON.parse(messages[1].content);if(!data.本幕)return '{}';
+  return JSON.stringify([{side:'A',text:data.本幕===ACTS[0].label?anchor:callback},{side:'B',text:'行吧。'}]);
+ }});
+ const script=await writer.write({acts:ACTS.slice(0,2)});
+ assert.ok(script.turns.some(turn=>turn.text===callback));assert.equal(script.meta.duplicates,0);
+});
+
+test('参考轮数可拆短问短答，相同短回声跨幕仍保留',async()=>{
+ const writer=new ScriptWriter({sides:SIDES,topic:'题',retries:0,complete:async messages=>{
+  const data=JSON.parse(messages[1].content);
+  if(!data.本幕)return '{}';
+  return JSON.stringify([{side:'A',text:'为什么？'},{side:'B',text:'你说得对。'},{side:'A',text:'那换个条件呢？'},{side:'B',text:'这个我再想想。'}]);
+ }});
+ const script=await writer.write({acts:[ACTS[0],ACTS.at(-1)]});
+ assert.equal(script.turns.length,8);
+ assert.equal(script.turns.filter(turn=>turn.text==='你说得对。').length,2);
+ assert.equal(script.meta.duplicates,0);assert.equal(writer.stats.refined,0);
+});
+
+test('总预算已够不再扩写；不足时只补实质内容并保持原顺序',async()=>{
+ const calls=[];
+ const writer=new ScriptWriter({sides:SIDES,complete:async messages=>{
+  const rows=JSON.parse(messages[1].content);calls.push(rows);
+  return JSON.stringify(rows.map(row=>({i:row.i,text:row.text+'具体还得看看交接时谁能做什么，别先替别人答应下来。'})));
+ }});
+ const long=line(900);
+ assert.equal(await writer.refineGroup([{side:'A',text:long}],{targetSeconds:20}),0);
+ assert.equal(calls.length,0);
+ const turns=[{side:'A',text:'为什么？'},{side:'B',text:line(901).slice(0,45)},{side:'A',text:line(902).slice(0,70)},{side:'B',text:'你说得对。'}];
+ const originals=turns.map(turn=>turn.text);
+ await writer.refineGroup(turns,{targetSeconds:120});
+ assert.deepEqual(calls[0].map(row=>row.text),[originals[1],originals[2]],'不能按长度排序打乱对话');
+ assert.equal(turns[0].text,originals[0]);assert.equal(turns[3].text,originals[3]);
+ assert.ok(turns[1].text.length>originals[1].length);assert.ok(turns[2].text.length>originals[2].length);
 });
