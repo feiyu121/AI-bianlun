@@ -1,0 +1,10 @@
+data/
+runtime/
+.env
+node_modules/
+*.log
+.qa/
+.idea/
+.venv/
+__pycache__/
+*.pyc

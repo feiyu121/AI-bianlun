@@ -1,0 +1,10 @@
+{
+  "name": "ai-bianlun",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "独立长场 AI 辩论直播工作台",
+  "engines": {"node": ">=20.18"},
+  "scripts": {"start": "node server.mjs", "test": "node tools/test.mjs", "test:scene": "node tools/check-scene.mjs"},
+  "license": "AGPL-3.0-only"
+}

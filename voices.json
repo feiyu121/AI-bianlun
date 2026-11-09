@@ -1,0 +1,16 @@
+[
+ {"id":"zh-CN-XiaoxiaoNeural","name":"晓晓","label":"普通话女声 · 明亮","group":"普通话","sample":true},
+ {"id":"zh-CN-XiaoyiNeural","name":"晓伊","label":"普通话女声 · 轻快","group":"普通话","sample":true},
+ {"id":"zh-TW-HsiaoChenNeural","name":"晓臻","label":"台湾国语女声","group":"台湾国语","sample":true},
+ {"id":"zh-TW-HsiaoYuNeural","name":"晓雨","label":"台湾国语女声","group":"台湾国语","sample":true},
+ {"id":"zh-HK-HiuGaaiNeural","name":"晓佳","label":"香港粤语女声","group":"粤语","sample":true},
+ {"id":"zh-HK-HiuMaanNeural","name":"晓曼","label":"香港粤语女声","group":"粤语","sample":true},
+ {"id":"zh-CN-liaoning-XiaobeiNeural","name":"晓北","label":"东北方言女声","group":"方言","sample":true},
+ {"id":"zh-CN-shaanxi-XiaoniNeural","name":"晓妮","label":"陕西方言女声","group":"方言","sample":true},
+ {"id":"zh-CN-YunxiaNeural","name":"云夏","label":"普通话男声 · 少年感","group":"普通话","sample":true},
+ {"id":"zh-CN-YunxiNeural","name":"云希","label":"普通话男声 · 青年","group":"普通话","sample":true},
+ {"id":"zh-CN-YunjianNeural","name":"云健","label":"普通话男声 · 浑厚","group":"普通话"},
+ {"id":"zh-CN-YunyangNeural","name":"云扬","label":"普通话男声 · 播报","group":"普通话"},
+ {"id":"zh-TW-YunJheNeural","name":"云哲","label":"台湾国语男声","group":"台湾国语"},
+ {"id":"zh-HK-WanLungNeural","name":"云龙","label":"香港粤语男声","group":"粤语"}
+]

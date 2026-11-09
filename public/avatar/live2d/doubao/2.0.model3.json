@@ -1,0 +1,75 @@
+{
+	"Version": 3,
+	"FileReferences": {
+		"Moc": "2.0.moc3",
+		"Textures": [
+			"2.0.4096/texture_00.png",
+			"2.0.4096/texture_01.png"
+		],
+		"Physics": "2.0.physics3.json",
+		"DisplayInfo": "2.0.cdi3.json",
+		"Expressions": [
+			{
+				"Name": "微笑",
+				"File": "2.0.smile.exp3.json"
+			},
+			{
+				"Name": "悲伤",
+				"File": "2.0.sad.exp3.json"
+			},
+			{
+				"Name": "生气",
+				"File": "2.0.angry.exp3.json"
+			},
+			{
+				"Name": "惊讶",
+				"File": "2.0.surprised.exp3.json"
+			}
+		],
+		"Motions": {
+			"Idle": [
+				{
+					"File": "2.0.idle.motion3.json"
+				},
+				{
+					"File": "2.0.dance.motion3.json"
+				},
+				{
+					"File": "2.0.jump.motion3.json"
+				}
+			],
+			"Blink": [
+				{
+					"File": "2.0.blink.motion3.json"
+				}
+			],
+			"Nod": [
+				{
+					"File": "2.0.nod.motion3.json"
+				}
+			],
+			"Shake": [
+				{
+					"File": "2.0.shake.motion3.json"
+				}
+			]
+		}
+	},
+	"Groups": [
+		{
+			"Target": "Parameter",
+			"Name": "EyeBlink",
+			"Ids": [
+				"ParamEyeLOpen",
+				"ParamEyeROpen"
+			]
+		},
+		{
+			"Target": "Parameter",
+			"Name": "LipSync",
+			"Ids": [
+				"ParamMouthOpenY"
+			]
+		}
+	]
+}

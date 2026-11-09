@@ -1,0 +1,21 @@
+import {inflateSync,gunzipSync,brotliDecompressSync} from 'node:zlib';import {createHash} from 'node:crypto';
+const MAX=8*1024*1024;
+export function protobuf(data){const b=Buffer.from(data);if(b.length>MAX)throw new Error('数据包过大');let at=0;const result=new Map();const read=()=>{let n=0n,shift=0n;for(let i=0;i<10;i++){if(at>=b.length)throw new Error('数据不完整');const v=b[at++];n|=BigInt(v&127)<<shift;if(v<128)return n;shift+=7n;}throw new Error('整数过长');};
+ while(at<b.length){const tag=Number(read()),field=tag>>>3,type=tag&7;let value;if(!field)throw new Error('字段无效');if(type===0){const n=read();value=n>BigInt(Number.MAX_SAFE_INTEGER)?n.toString():Number(n);}else if(type===2){const n=Number(read());if(n<0||n>MAX||at+n>b.length)throw new Error('长度无效');value=b.subarray(at,at+n);at+=n;}else if(type===1||type===5){const n=type===1?8:4;if(at+n>b.length)throw new Error('长度无效');value=b.subarray(at,at+n);at+=n;}else throw new Error('不支持的编码');if(!result.has(field))result.set(field,[]);result.get(field).push(value);}return result;
+}
+const first=(m,n)=>m.get(n)?.[0],str=(m,n)=>{const v=first(m,n);return Buffer.isBuffer(v)?v.toString('utf8'):String(v??'');};
+export function kuaishouFrames(input,room){const outer=protobuf(input),type=Number(first(outer,1));if(type===300)return {authenticated:true,events:[]};if(type!==310)return {events:[]};let payload=first(outer,3);if(!Buffer.isBuffer(payload))return {events:[]};const compression=Number(first(outer,2)||1);if(compression===2)payload=gunzipSync(payload,{maxOutputLength:MAX});else if(compression>2)throw new Error('暂不支持该快手数据编码');const feeds=protobuf(payload),events=[];
+ for(const feed of feeds.get(5)||[]){const row=protobuf(feed),user=protobuf(first(row,2)||Buffer.alloc(0));const id=str(row,1),text=str(row,3);if(!id||!text)continue;events.push({type:'comment',id,room,userId:str(user,1),name:str(user,2),text});}
+ for(const feed of feeds.get(9)||[]){const row=protobuf(feed),user=protobuf(first(row,2)||Buffer.alloc(0)),id=str(row,1);if(!id)continue;const giftId=str(row,4),count=Math.min(10000,Math.max(1,Number(first(row,8)||first(row,7)||1)));events.push({type:'gift',id,room,userId:str(user,1),name:str(user,2),giftId,giftName:'礼物ID'+giftId,repeatCount:count,combo:Boolean(str(row,6)),groupId:str(row,6)});}
+ return {authenticated:true,events};
+}
+export function bilibiliMessage(body,room){const cmd=String(body.cmd||'').split(':')[0];if(cmd==='DANMU_MSG'){const a=body.info||[],meta=a[0]||[],user=a[2]||[];if(!a[1])return null;const id=String(meta[5]||createHash('sha256').update(JSON.stringify(a)).digest('hex'));return {type:'comment',id,room,userId:String(user[0]||''),name:String(user[1]||'观众'),text:String(a[1])};}
+ const d=body.data||{};if(cmd==='SEND_GIFT')return {type:'gift',id:String(d.tid||d.batch_combo_id||createHash('sha256').update(JSON.stringify(d)).digest('hex')),room,userId:String(d.uid||''),name:String(d.uname||'观众'),giftId:String(d.giftId||''),giftName:String(d.giftName||'礼物'),repeatCount:Math.min(10000,Math.max(1,Number(d.num||1))),combo:false};
+ if(cmd==='INTERACT_WORD'&&Number(d.msg_type)===1)return {type:'enter',id:'enter-'+String(d.uid)+'-'+String(d.timestamp),room,userId:String(d.uid||''),name:String(d.uname||'观众')};return null;}
+export function bilibiliFrames(input,room,depth=0){if(depth>4)throw new Error('嵌套过深');const b=Buffer.from(input);if(b.length>MAX)throw new Error('数据包过大');const result={authenticated:false,events:[]};let at=0;
+ while(at+16<=b.length){const size=b.readUInt32BE(at),header=b.readUInt16BE(at+4),version=b.readUInt16BE(at+6),op=b.readUInt32BE(at+8);if(size<header||header<16||size>MAX||at+size>b.length)throw new Error('B站数据包无效');const payload=b.subarray(at+header,at+size);at+=size;
+  if(op===8){const value=JSON.parse(payload.toString());result.authenticated=value.code===0;continue;}if(op!==5)continue;
+  if(version===2||version===3){const child=bilibiliFrames(version===2?inflateSync(payload,{maxOutputLength:MAX}):brotliDecompressSync(payload,{maxOutputLength:MAX}),room,depth+1);result.authenticated ||=child.authenticated;result.events.push(...child.events);}
+  else{const e=bilibiliMessage(JSON.parse(payload.toString()),room);if(e)result.events.push(e);}
+ }return result;
+}
