@@ -1,6 +1,7 @@
 import {connect} from './api.js';
 import {Speaker} from './speaker.js';
 import {captionAt} from './captions.js';
+import {renderCamps} from './camps.js';
 const $=id=>document.getElementById(id),params=new URLSearchParams(location.search),preview=params.has('preview');
 let data,avatars=[];
 function fit(){const scale=Math.min(innerWidth/540,innerHeight/960);$('stage').style.transform=`translate(${(innerWidth-540*scale)/2}px,${(innerHeight-960*scale)/2}px) scale(${scale})`;}
@@ -16,6 +17,7 @@ function paintCaption(){
 }
 function render(next){
   data=next;if(!preview)speaker.update(next);
+  renderCamps(next,'scene-');
   const {script,cycle,config,playback}=next;
   const nameA=script.sides?.find(side=>side.id==='A')?.name||config.characterName,nameB=script.sides?.find(side=>side.id==='B')?.name||config.opponentName;
   $('scene-brand').textContent=config.title;$('scene-name-a').textContent=nameA;$('scene-name-b').textContent=nameB;
@@ -34,7 +36,7 @@ function render(next){
   for(const [side,key]of [['A','a'],['B','b']]){
     const stance=script.sides?.find(x=>x.id===side)?.stance||'';$('stance-'+key).textContent=stance||(side==='A'?'嘴上不饶人，也会心软和改口。':'慢悠悠补刀，也会被逗笑。');
   }
-  const wall=script.wall.slice(-3);$('scene-wall').replaceChildren(...(wall.length?wall.map(row=>{const div=element('div','');div.className='wall-row';div.dataset.state=row.state;div.append(element('b',row.name),element('span',row.text),element('small',row.state==='replied'?'已回应':row.state==='heard'?'已听见':''));return div;}):[Object.assign(element('p','发出你的观点，让现场听见。'),{className:'wall-empty'})]));
+  const wall=script.wall.slice(-2);$('scene-wall').replaceChildren(...(wall.length?wall.map(row=>{const div=element('div','');div.className='wall-row';div.dataset.state=row.state;div.append(element('b',row.name),element('span',row.text),element('small',row.state==='replied'?'已回应':row.state==='heard'?'已听见':''));return div;}):[Object.assign(element('p','发出你的观点，让现场听见。'),{className:'wall-empty'})]));
   const receipt=[...script.receipts].reverse().find(row=>row.kind!=='bubble'&&Date.now()-row.at<6500);
   $('scene-receipt').hidden=!receipt;if(receipt){$('receipt-name').textContent=`${receipt.name} · ${receipt.name2} 接话`;$('receipt-text').textContent=receipt.said;}
   const intermission=!script.active&&['result','vote','ready','write'].includes(cycle.phase);$('intermission').hidden=!intermission;
@@ -45,7 +47,8 @@ function render(next){
     $('scene-vote').replaceChildren(...(voting?(cycle.vote.candidates||[]).map(row=>{
       const card=element('div','');card.className='vote-card';const bar=element('i','');bar.className='vote-bar';bar.style.width=Math.round(row.share*100)+'%';const content=element('div','');content.append(element('span',row.topic),element('small',row.count+' 票'));card.append(bar,element('b',row.index),content);return card;
     }):[Object.assign(element('p',cycle.phase==='result'?`双方完成 ${script.stats.turns} 句交锋。观众的下一道问题，会让这场讨论继续。`:'剧本分幕生成，声音逐句预热。准备完成后自动开场。'),{className:'summary-row'})]));
-    $('scene-vote-footer').textContent=voting?(cycle.vote.closed?'已锁票，下一场马上开始':`投票窗口剩余约 ${Math.ceil((cycle.vote.remainingMs||0)/60000)} 分钟`):'';
+    const camps=next.camps;
+    $('scene-vote-footer').textContent=(voting?(cycle.vote.closed?'已锁票，下一场马上开始':`投票窗口剩余约 ${Math.ceil((cycle.vote.remainingMs||0)/60000)} 分钟`):'')+(camps?.state==='closed'?`${voting?' · ':''}本场支持票：${camps.sides.map(side=>`${side.name} ${side.votes} 票`).join(' / ')}`:'');
   }
 }
 connect(render,ok=>{if(!ok)$('scene-status').textContent='连接恢复中';});

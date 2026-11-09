@@ -11,6 +11,7 @@ import {LLMClient} from '../lib/llm-client.mjs';
 import {CloudVoice} from '../lib/cloud-voice.mjs';
 import {estimateDuration} from '../lib/speech.mjs';
 import {ScriptWriter} from '../lib/script/writer.mjs';
+import {Douyin} from '../lib/douyin.mjs';
 
 const root=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'..');
 const sample=()=>({topic:'加班应该如何安排',turns:[{side:'A',act:1,text:'先把工作目标讲清楚。',reaction:true},{side:'B',act:2,text:'也要考虑完成目标的代价。',reaction:true}]});
@@ -97,6 +98,82 @@ test('投票期普通弹幕继续进入聊天，有效数字票只进票箱',asy
   app.cycle.vote.open({candidates:app.snapshot().topics.slice(0,4)});app.cycle.phase='vote';
   const vote=await app.receive({type:'comment',name:'观众一',userId:'vote',text:'1'});assert.equal(vote.vote.ok,true);assert.equal(calls.length,0);
   const chat=await app.receive({type:'comment',name:'观众二',userId:'chat',text:'今天状态怎么样'});assert.equal(chat.heard,true);await Promise.all([...app.jobs]);assert.equal(calls.length,1);
+});
+
+test('阵营弹幕路由：重复去重、转投、暂停可加入，不进入接话模型或点名',async t=>{
+  const calls=[];const app=await runtime(t,{llm:{view:()=>({hasKey:true}),complete:async m=>{calls.push(m);return '听见了。';}}});
+  app.startSingle({script:sample()});await until(()=>app.runner.active);
+  const receive=(text,id='1',userId='joiner')=>app.receive({type:'comment',text,id,userId,name:'同名观众',source:'douyin'});
+  assert.equal((await receive('1')).camp.ok,true);
+  assert.equal((await receive('2')).duplicate,true,'同一事件重传不改阵营');
+  assert.equal((await receive('支持肉包','2')).camp.duplicate,true);
+  assert.equal((await receive('2','3')).camp.changed,true);
+  app.runner.pause();assert.equal((await receive('支持肉包','4','other')).camp.ok,true);
+  assert.deepEqual(app.snapshot().camps.sides.map(side=>side.count),[1,1]);
+  assert.equal(calls.length,0);assert.equal(app.runner.view().wall.length,0);
+  assert.equal(app.engine.logs.filter(row=>row.type==='camp').length,3);
+  const mention=await receive('肉包你怎么看','5','mention');assert.equal(mention.routed,'mention');
+  await app.stop();assert.equal(app.snapshot().camps.state,'closed');assert.equal(app.snapshot().camps.total,2);
+  assert.equal((await receive('1','6')).camp.reason,'closed');assert.equal(app.snapshot().camps.total,2);
+  app.startSingle({script:sample()});await until(()=>app.runner.active);
+  assert.equal(app.snapshot().camps.total,0);assert.equal((await receive('1','7')).camp.ok,true);
+  await app.stop();
+});
+test('阵营安全检查、匿名拒绝以及选题数字票优先，礼物不增加阵营人数',async t=>{
+  const app=await runtime(t);
+  assert.equal((await app.receive({type:'comment',text:'支持肉包'})).camp.reason,'closed');
+  app.startSingle({script:sample()});await until(()=>app.runner.active);
+  assert.equal((await app.receive({type:'comment',text:'1'})).camp.reason,'anonymous');
+  await app.safety.configure({blockedTerms:['支持肉包']});
+  assert.equal((await app.receive({type:'comment',text:'支持肉包',userId:'blocked'})).blocked,true);
+  await app.receive({type:'gift',gift:'sunglasses',label:'墨镜',count:1,userId:'gift',name:'礼物观众'});
+  assert.equal(app.snapshot().camps.total,0);
+  await app.receive({type:'comment',text:'2',userId:'joined',name:'观众'});
+  await app.stop();
+  app.cycle.phase='vote';app.cycle.vote.open({candidates:app.snapshot().topics.slice(0,4)});
+  const vote=await app.receive({type:'comment',text:'1',userId:'vote',name:'选题观众'});
+  assert.equal(vote.vote.ok,true);assert.equal(app.cycle.vote.total(),1);assert.equal(app.snapshot().camps.total,1);
+  assert.equal((await app.receive({type:'comment',text:'加入鲸鱼娘阵营',userId:'late',name:'观众'})).camp.reason,'closed');
+});
+test('单场自然结束封存阵营，只记录一次结果',async t=>{
+  const app=await runtime(t,{renderVoice:async()=>({url:'/audio/mock.mp3',durationMs:1})});
+  // End immediately after the real first spoken line; exercise the runner onEnd path.
+  const spoken=app.runner.onSpoken;app.runner.onSpoken=(...args)=>{spoken(...args);app.camps.cast({userId:'1'},'A');app.runner.index=app.runner.turns.length;};
+  app.startSingle({script:sample()});await app.task;
+  assert.equal(app.snapshot().camps.state,'closed');assert.equal(app.snapshot().camps.total,1);
+  assert.equal(app.engine.logs.filter(row=>row.title==='本场阵营支持').length,1);
+});
+test('正赛礼物增量计票独立于回嘴队列，封存后/场间不加票且不影响选题票',async t=>{
+  const app=await runtime(t);app.startSingle({script:sample()});await until(()=>app.runner.active);app.runner.pause();
+  const gift={type:'gift',source:'douyin',id:'score-1',gift:'candy',count:3,name:'送礼观众'};
+  const first=await app.receive(gift);assert.equal(first.giftVote.points,9);assert.equal(first.queued,false);
+  assert.equal((await app.receive(gift)).duplicate,true);
+  await app.receive({...gift,id:'score-2',gift:'beer',count:2,triggerSkill:false});
+  assert.deepEqual(app.snapshot().camps.sides.map(side=>side.votes),[9,6]);
+  assert.equal((await app.receive({...gift,id:undefined})).giftVote.reason,'missing-id');
+  assert.equal(app.snapshot().camps.totalVotes,15);assert.equal(app.snapshot().camps.total,0);
+  await app.stop();
+  app.cycle.phase='vote';app.cycle.vote.open({candidates:app.snapshot().topics.slice(0,4)});
+  assert.equal((await app.receive({...gift,id:'late'})).giftVote.reason,'closed');
+  assert.equal(app.cycle.vote.total(),0);assert.equal(app.snapshot().camps.totalVotes,15);
+  app.cycle.phase='idle';app.startSingle({script:sample()});await until(()=>app.runner.active);
+  assert.equal(app.snapshot().camps.totalVotes,0);await app.stop();
+});
+test('平台接入使用当前平台礼物映射并去重，旧保存映射升级后仍正确',async t=>{
+  t.mock.method(Douyin.prototype,'check',async function(){this.state.dependency='ready';return true;});
+  const app=await runtime(t,{platformEnabled:true});
+  await app.platform.store.save({provider:'bilibili',profiles:{bilibili:{map:{sunglasses:['自定义回嘴']}}}});
+  await app.platform.init();
+  assert.deepEqual(app.platform.view().giftMap.candy,['辣条']);
+  assert.deepEqual(app.platform.view().giftMap.sunglasses,['自定义回嘴']);
+  app.startSingle({script:sample()});await until(()=>app.runner.active);app.runner.pause();
+  const raw={id:'b1',type:'gift',userId:'u1',giftName:'辣条',repeatCount:2};
+  await app.platform.ingest(raw);assert.equal(app.camps.view().totalVotes,6);
+  assert.equal((await app.platform.ingest(raw)).duplicate,true);assert.equal(app.camps.view().totalVotes,6);
+  await app.platform.configure({provider:'kuaishou'});
+  await app.platform.ingest({...raw,id:'k1',giftName:'啤酒',repeatCount:1});
+  assert.deepEqual(app.camps.view().sides.map(side=>side.votes),[6,3]);
+  await app.stop();
 });
 test('停止等待中的语音任务会收到取消信号，不会发布迟到台词',async t=>{
   let signal;const app=await runtime(t,{renderVoice:(_item,_settings,options)=>{signal=options.signal;return new Promise((resolve,reject)=>signal.addEventListener('abort',()=>reject(signal.reason),{once:true}));}});

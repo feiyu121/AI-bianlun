@@ -1,4 +1,5 @@
 import {post,connect} from './api.js';
+import {renderCamps} from './camps.js';
 const $=id=>document.getElementById(id);
 const node=(tag,text,className)=>{const e=document.createElement(tag);if(text!==undefined)e.textContent=text;if(className)e.className=className;return e;};
 let snapshot,loaded=false,scriptSignature='',actSignature='',historySignature='',generationLogSignature='',toastTimer,voiceList=[],safetyPending=false;
@@ -20,6 +21,7 @@ document.querySelectorAll('[data-tab]').forEach(button=>button.addEventListener(
 const phases={idle:'准备中',write:'读取库存剧本',match:'正赛进行中',result:'本场已结束',vote:'观众选题中',ready:'下一场准备中'};
 function render(data){
   snapshot=data;const {script,cycle,operation,system}=data;
+  renderCamps(data);
   if(!loaded){
     $('topic').replaceChildren(...data.topics.map(item=>{const option=node('option',item.topic);option.value=item.id;return option;}));
     fillSettings(data);loaded=true;
@@ -101,7 +103,7 @@ function fillSettings(data){const {config,system}=data;
   $('voice-provider').value=system.voice.provider;$('voice-resource').value=system.voice.resourceId;$('cloud-speaker-a').value=system.voice.speaker;$('cloud-speaker-b').value=system.voice.opponentSpeaker||'';cloudFields();
   $('live-provider').value=system.platform.provider||'douyin';fillRoom();
 }
-function fillRoom(){const platform=snapshot?.system.platform||{},provider=$('live-provider').value;$('live-room').value=platform.rooms?.[provider]||'';$('cookie-label').hidden=provider!=='douyin';$('gift-names').value=provider===platform.provider?(platform.giftMap?.sunglasses||[]).join(','):'';}
+function fillRoom(){const platform=snapshot?.system.platform||{},provider=$('live-provider').value;$('live-room').value=platform.rooms?.[provider]||'';$('cookie-label').hidden=provider!=='douyin';$('gift-names').value=provider===platform.provider?(platform.giftMap?.sunglasses||[]).join(','):'';for(const rule of snapshot?.camps?.giftRules||[]){$('gift-'+rule.gift).value=provider===platform.provider?(platform.giftMap?.[rule.gift]||[]).join(','):'';$('gift-label-'+rule.gift).textContent=`${rule.side==='A'?snapshot.config.characterName:snapshot.config.opponentName}阵营 · +${rule.weight} 票/个`;} }
 function cloudFields(){$('cloud-fields').hidden=$('voice-provider').value!=='volcengine';}
 $('voice-provider').onchange=cloudFields;$('live-provider').onchange=fillRoom;
 bind('start-cycle','/api/cycle/start',()=>({scriptId:$('play-script').value,repeat:$('repeat-library').checked}),'正在从剧本库准备首场');
@@ -114,16 +116,20 @@ bind('stop','/api/script/stop',{},'已停止全部场次和生成任务');bind('
 $('pause').onclick=event=>run(event.currentTarget,()=>post(snapshot.script.paused?'/api/script/resume':'/api/script/pause'));
 $('demo').onclick=event=>run(event.currentTarget,async()=>{const script=await fetch('/demo.json').then(r=>r.json());await post('/api/script/start',{script});toast('简短样稿已启动，请在 OBS 场景开启声音');});
 $('import-script').onchange=async event=>{const file=event.target.files[0];if(!file)return;try{if(file.size>1024*1024)throw new Error('剧本不能超过 1 MB');const script=JSON.parse(await file.text());await post('/api/script/import',{script});toast('剧本已导入');}catch(error){toast(error.message);}event.target.value='';};
-$('test-event').onsubmit=event=>{event.preventDefault();const text=$('test-comment').value.trim();if(!text)return;run(event.submitter,async()=>{await post('/api/events',{type:'comment',name:'场控观众',userId:'studio-viewer',text,id:crypto.randomUUID()});$('test-comment').value='';toast('测试弹幕已发送');});};
+$('test-event').onsubmit=event=>{event.preventDefault();const text=$('test-comment').value.trim();if(!text)return;run(event.submitter,async()=>{const result=await post('/api/events',{type:'comment',source:'test',name:'场控观众',userId:'studio-viewer',text,id:crypto.randomUUID()});$('test-comment').value='';toast(result.camp?result.camp.ok?(result.camp.duplicate?'已在该阵营，不重复加票':result.camp.changed?'已切换阵营':'已加入阵营'):result.camp.reason==='closed'?'正赛开场后才能加入阵营':'缺少观众身份，未加入阵营':result.vote?'下一场选题投票已记录':'测试弹幕已发送');});};
 bind('test-gift','/api/events',()=>({type:'gift',gift:'sunglasses',label:'墨镜',name:'场控观众',userId:'studio-viewer',count:1,id:crypto.randomUUID()}),'测试礼物已发送');
+for(const [side,gift] of [['a','candy'],['b','beer']])$('test-gift-'+side).onclick=event=>run(event.currentTarget,async()=>{
+  const result=await post('/api/events',{type:'gift',source:'test',gift,label:snapshot.system.platform.giftMenu?.[gift]?.[0]||gift,name:'场控观众',userId:'studio-viewer',count:1,id:crypto.randomUUID()});
+  toast(result.giftVote.ok?'礼物已计入 +'+result.giftVote.points+' 票':'正赛开场后礼物才计票');
+});
 $('llm-form').onsubmit=event=>{event.preventDefault();run(event.submitter,async()=>{await post('/api/llm/settings',{baseUrl:$('llm-base').value,model:$('llm-model').value,apiKey:$('llm-key').value});$('llm-key').value='';toast('模型设置已保存');});};
 bind('test-llm','/api/llm/test',{},'模型接口正常');
 $('studio-form').onsubmit=event=>{event.preventDefault();run(event.submitter,async()=>{await post('/api/config',{title:$('studio-title').value,characterName:$('name-a').value,opponentName:$('name-b').value,voiceName:$('voice-a').value,opponentVoice:$('voice-b').value,speechRate:Number($('speech-rate').value),voicePitch:Number($('voice-pitch').value),volume:Number($('volume').value)});toast('辩手设置已保存');});};
 $('voice-form').onsubmit=event=>{event.preventDefault();run(event.submitter,async()=>{const input={provider:$('voice-provider').value};if(input.provider==='volcengine')Object.assign(input,{apiKey:$('voice-key').value,resourceId:$('voice-resource').value,speaker:$('cloud-speaker-a').value,opponentSpeaker:$('cloud-speaker-b').value});await post('/api/voice/settings',input);$('voice-key').value='';toast('语音设置已保存');});};
 for(const side of ['a','b'])$('voice-test-'+side).onclick=event=>run(event.currentTarget,async()=>{const audio=await post('/api/voice/test',{side:side.toUpperCase()});$('voice-preview').hidden=false;$('voice-preview').src=audio.url;await $('voice-preview').play().catch(()=>{});});
-$('live-form').onsubmit=event=>{event.preventDefault();run(event.submitter,async()=>{const input={provider:$('live-provider').value,room:$('live-room').value};if($('live-cookie').value)input.cookie=$('live-cookie').value;await post('/api/live/settings',input);$('live-cookie').value='';toast('直播间已保存');});};
+$('live-form').onsubmit=event=>{event.preventDefault();run(event.submitter,async()=>{const input={provider:$('live-provider').value,room:$('live-room').value};if($('live-cookie').value)input.cookie=$('live-cookie').value;const result=await post('/api/live/settings',input);snapshot.system.platform=result.platform;fillRoom();$('live-cookie').value='';toast('直播间已保存');});};
 bind('connect-live','/api/live/connect',{},'正在连接直播间');bind('disconnect-live','/api/live/disconnect',{},'已断开直播间');
-$('save-gifts').onclick=event=>run(event.currentTarget,async()=>{const map=structuredClone(snapshot.system.platform.giftMap);map.sunglasses=$('gift-names').value.split(/[,，]/u).map(x=>x.trim()).filter(Boolean);await post('/api/live/settings',{giftMap:map});toast('幕间回应礼物已更新');});
+$('save-gifts').onclick=event=>run(event.currentTarget,async()=>{const map=structuredClone(snapshot.system.platform.giftMap);map.sunglasses=$('gift-names').value.split(/[,，]/u).map(x=>x.trim()).filter(Boolean);for(const rule of snapshot.camps.giftRules)map[rule.gift]=$('gift-'+rule.gift).value.split(/[,，]/u).map(x=>x.trim()).filter(Boolean);await post('/api/live/settings',{giftMap:map});toast('礼物计票与回应映射已更新');});
 $('safety-form').onsubmit=event=>{event.preventDefault();run(event.submitter,async()=>{await post('/api/safety',{blockedTerms:$('blocked-terms').value.split('\n').map(x=>x.trim()).filter(Boolean)});toast('播出屏蔽词已更新');});};
 $('safety-enabled').onchange=async()=>{
   const enabled=$('safety-enabled').checked;safetyPending=true;$('safety-enabled').disabled=true;
