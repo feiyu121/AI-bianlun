@@ -1,4 +1,4 @@
-export function renderCamps(data,prefix=''){
+export function renderCamps(data,prefix='',{compact=false}={}){
   const $=id=>document.getElementById(prefix+id),camps=data.camps||{},voting=data.cycle.phase==='vote';
   const active=camps.state==='open'&&data.script.active;
   for(const [id,key,fallback] of [['A','a',data.config.characterName],['B','b',data.config.opponentName]]){
@@ -12,10 +12,13 @@ export function renderCamps(data,prefix=''){
   const nameA=$('camp-name-a').textContent,nameB=$('camp-name-b').textContent;
   $('camp-rule').textContent=voting?`场间发数字选下一题；本场 ${totalVotes} 票已封存。`:active?`发 1 / 支持${nameA}，发 2 / 支持${nameB} · 一人一票，可换阵营`:
     camps.state==='closed'?`本场 ${totalVotes} 票 · 已结束，下场重新计票`:`开场后发 1 支持${nameA}，发 2 支持${nameB}`;
+  if(compact&&active)$('camp-rule').textContent=`发 1 支持${nameA} · 发 2 支持${nameB} · 一人一票`;
   const platform=data.system.platform,groups=['A','B'].map((id,index)=>{
     const gifts=(camps.giftRules||[]).filter(rule=>rule.side===id&&platform.giftMap?.[rule.gift]?.length!==0).map(rule=>`${platform.giftMenu?.[rule.gift]?.[0]||platform.giftMap?.[rule.gift]?.[0]||rule.label}+${rule.weight}`);
     return gifts.length?`${gifts.join(' / ')} → ${index?nameB:nameA}`:'';
   }).filter(Boolean);
-  $('camp-gift-rule').textContent=groups.length?groups.join(' · '):'弹幕加入 1 票，指定礼物追加支持票';
-  $('camp-gift-rule').title=$('camp-gift-rule').textContent;
+  const hints=[...groups,...(platform.giftMap?.sunglasses?.length!==0?[`${platform.giftMenu?.sunglasses?.[0]||platform.giftMap?.sunglasses?.[0]||'墨镜'}礼物 · 换一句幕间回嘴`]:[])];
+  if(!hints.length)hints.push('发送 1 或 2，支持你喜欢的角色');
+  $('camp-gift-rule').textContent=compact?hints[Math.floor(Date.now()/6000)%hints.length]:groups.length?groups.join(' · '):'弹幕加入 1 票，指定礼物追加支持票';
+  $('camp-gift-rule').title=groups.join(' · ');
 }

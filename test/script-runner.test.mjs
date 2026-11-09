@@ -120,6 +120,21 @@ test('空档：脚本是提前写好的，句与句之间不该有任何等待',
  assert.equal(stats.starved,0);
  assert.equal(stats.rhythm,'ok');
 });
+
+test('接话、点名和礼物完整进入主字幕，随实际开口发布并保留观众名',async()=>{
+ const {runner,engine,step}=make({voiceExpected:()=>true});
+ for(const kind of ['reaction','mention','gift','script']){
+  const previous=engine.state.scriptLine,text='这是给观众的完整回答，不能被回执的六十字限制截断。'.repeat(4);
+  const turn={id:kind,side:'B',text,durationMs:20000,audience:kind==='script'?undefined:{name:'观众甲'}};
+  const speaking=runner.speak(turn,{kind});await flush();
+  assert.equal(engine.state.scriptLine,previous,'出声前不能提前切换字幕');
+  runner.voiceStarted(turn.utteranceId);await flush();
+  assert.equal(engine.state.scriptLine.text,text);assert.equal(engine.state.scriptLine.kind,kind);
+  assert.equal(engine.state.scriptLine.audienceName,kind==='script'?'':'观众甲');
+  assert.equal(engine.state.scriptLine.side,'B');assert.equal(engine.state.scriptLine.id,turn.utteranceId);
+  await step();await speaking;
+ }
+});
 test('对话记忆只收到实际说完的台词，预读和中途停止不会记录未来',async()=>{
  const heard=[];const {runner,step}=make({n:3,onSpoken:(turn,{kind})=>heard.push({text:turn.text,kind})});
  await runner.start();await flush();assert.equal(heard.length,0);

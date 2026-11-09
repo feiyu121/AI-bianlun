@@ -1,23 +1,26 @@
 import {connect} from './api.js';
 import {Speaker} from './speaker.js';
 import {captionAt} from './captions.js';
+import {fitCaptionPages} from './caption-layout.js';
 import {renderCamps} from './camps.js';
 const $=id=>document.getElementById(id),params=new URLSearchParams(location.search),preview=params.has('preview');
-let data,avatars=[];
-function fit(){const scale=Math.min(innerWidth/540,innerHeight/960);$('stage').style.transform=`translate(${(innerWidth-540*scale)/2}px,${(innerHeight-960*scale)/2}px) scale(${scale})`;}
+let data,avatars=[],captionCache;
+function fit(){captionCache=null;const scale=Math.min(innerWidth/540,innerHeight/960);$('stage').style.transform=`translate(${(innerWidth-540*scale)/2}px,${(innerHeight-960*scale)/2}px) scale(${scale})`;}
 addEventListener('resize',fit);fit();
+document.fonts.ready.then(()=>{captionCache=null;});
 const speaker=new Speaker((enabled,message)=>{$('sound-toggle').textContent=enabled?'关闭声音':'开启声音';$('sound-status').textContent=message;});
 $('sound-toggle').onclick=()=>speaker.enabled?speaker.disable():speaker.enable().catch(error=>$('sound-status').textContent=error.message);
 if(preview)$('scene-controls').hidden=true;
 function element(tag,text){const el=document.createElement(tag);el.textContent=text;return el;}
 function paintCaption(){
   const line=data?.state.scriptLine;
-  const text=line?captionAt(line.text,Date.now()-line.at,line.durationMs):'观点可以不同，道理值得讲清楚。';
+  if(line&&captionCache?.text!==line.text)captionCache={text:line.text,pages:fitCaptionPages(line.text,$('scene-line'))};
+  const text=line?captionAt(line.text,Date.now()-line.at,line.durationMs,captionCache.pages):'观点可以不同，道理值得讲清楚。';
   if($('scene-line').textContent!==text)$('scene-line').textContent=text;
 }
 function render(next){
   data=next;if(!preview)speaker.update(next);
-  renderCamps(next,'scene-');
+  renderCamps(next,'scene-',{compact:true});
   const {script,cycle,config,playback}=next;
   const nameA=script.sides?.find(side=>side.id==='A')?.name||config.characterName,nameB=script.sides?.find(side=>side.id==='B')?.name||config.opponentName;
   $('scene-brand').textContent=config.title;$('scene-name-a').textContent=nameA;$('scene-name-b').textContent=nameB;
@@ -30,15 +33,18 @@ function render(next){
   $('scene-track').style.width=(script.total?script.index/script.total*100:0)+'%';
   const line=next.state.scriptLine;
   $('scene-speaker').textContent=line?.side==='B'?nameB:line?nameA:'辩';
+  const kind=line?.kind||'script',context={reaction:'接观众弹幕',mention:'点名回应',gift:'礼物回嘴'}[kind]||'';
+  $('scene-context').hidden=!context;
+  $('scene-context').textContent=context+(line?.audienceName?` · ${line.audienceName}`:'');
+  $('scene-context').title=$('scene-context').textContent;
+  $('scene-context').dataset.kind=kind;
+  $('scene-speaker').dataset.side=line?.side||'';
   paintCaption();
   const talking=playback.text?playback.speaker:script.active&&!script.paused?next.state.speakingSide:'';
   for(const side of ['A','B'])$('side-'+side.toLowerCase()).dataset.speaking=String(talking===side);
   for(const [side,key]of [['A','a'],['B','b']]){
     const stance=script.sides?.find(x=>x.id===side)?.stance||'';$('stance-'+key).textContent=stance||(side==='A'?'嘴上不饶人，也会心软和改口。':'慢悠悠补刀，也会被逗笑。');
   }
-  const wall=script.wall.slice(-2);$('scene-wall').replaceChildren(...(wall.length?wall.map(row=>{const div=element('div','');div.className='wall-row';div.dataset.state=row.state;div.append(element('b',row.name),element('span',row.text),element('small',row.state==='replied'?'已回应':row.state==='heard'?'已听见':''));return div;}):[Object.assign(element('p','发出你的观点，让现场听见。'),{className:'wall-empty'})]));
-  const receipt=[...script.receipts].reverse().find(row=>row.kind!=='bubble'&&Date.now()-row.at<6500);
-  $('scene-receipt').hidden=!receipt;if(receipt){$('receipt-name').textContent=`${receipt.name} · ${receipt.name2} 接话`;$('receipt-text').textContent=receipt.said;}
   const intermission=!script.active&&['result','vote','ready','write'].includes(cycle.phase);$('intermission').hidden=!intermission;
   if(intermission){
     const voting=cycle.phase==='vote';$('intermission-label').textContent=voting?'YOUR NEXT QUESTION':'BETWEEN THE ROUNDS';

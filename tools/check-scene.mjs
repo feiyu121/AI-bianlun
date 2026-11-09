@@ -107,10 +107,13 @@ try{
   await campScene.locator('#avatar-a[data-ready=true]').waitFor({timeout:60000});await campScene.locator('#avatar-b[data-ready=true]').waitFor({timeout:60000});
   assert.equal(await campScene.locator('#scene-camp-count-a').innerText(),'4 票');assert.equal(await campScene.locator('#scene-camp-count-b').innerText(),'4 票');
   assert.match(await campScene.locator('#scene-camp-rule').innerText(),/一人一票/);
-  assert.match(await campScene.locator('#scene-camp-gift-rule').innerText(),/棒棒糖\+3/);
-  assert.equal(await campScene.locator('.wall-row').count(),2);
-  const campLayout=await campScene.locator('.audience').evaluate(el=>({bottom:el.getBoundingClientRect().bottom,contentBottom:el.querySelector('#scene-wall').getBoundingClientRect().bottom,top:el.getBoundingClientRect().top,dialogueBottom:document.querySelector('.dialogue').getBoundingClientRect().bottom}));
-  assert.ok(campLayout.contentBottom<=campLayout.bottom,'阵营提示和弹幕不能溢出观众席 '+JSON.stringify(campLayout));assert.ok(campLayout.top>=campLayout.dialogueBottom,'观众席不能覆盖字幕');
+  assert.match(await campScene.locator('#scene-camp-gift-rule').getAttribute('title'),/棒棒糖\+3/);
+  assert.equal(await campScene.locator('#scene-wall,.audience,.wall-row').count(),0,'直播画面不重复显示平台弹幕');
+  assert.equal(app.runtime.runner.view().wall.length,2,'移除显示后仍接收并记录弹幕');
+  const safeArea=await campScene.locator('.camp-gift-hint').evaluate(el=>({top:el.getBoundingClientRect().top,bottom:el.getBoundingClientRect().bottom,panelTop:el.closest('.camp-panel').getBoundingClientRect().top,panelBottom:el.closest('.camp-panel').getBoundingClientRect().bottom,ruleBottom:document.getElementById('scene-camp-rule').getBoundingClientRect().bottom,dialogueTop:document.querySelector('.dialogue').getBoundingClientRect().top,dialogueBottom:document.querySelector('.dialogue').getBoundingClientRect().bottom,stageBottom:document.getElementById('stage').getBoundingClientRect().bottom}));
+  assert.ok(safeArea.top>=safeArea.ruleBottom&&safeArea.bottom<=safeArea.panelBottom,'礼物说明在支持票卡片内，位于站队提示下面');assert.ok(safeArea.panelBottom<=safeArea.dialogueTop,'礼物提示不能覆盖字幕');assert.ok(safeArea.stageBottom-safeArea.dialogueBottom>=120,'底部预留平台界面空间');
+  const scorePosition=await campScene.locator('.camp-panel').evaluate(el=>({top:el.getBoundingClientRect().top,bottom:el.getBoundingClientRect().bottom,characters:document.querySelector('.debaters').getBoundingClientRect().bottom,captions:document.querySelector('.dialogue').getBoundingClientRect().top}));
+  assert.ok(scorePosition.top>=scorePosition.characters&&scorePosition.bottom<=scorePosition.captions,'支持票在人物与字幕之间');
   await campScene.screenshot({path:path.join(output,'scene-camps.png')});
   await page.locator('#stop').click();
   await page.waitForFunction(()=>document.getElementById('operation').textContent.includes('已停止'));
@@ -121,6 +124,8 @@ try{
   await page.locator('#test-comment').fill('1');await page.locator('#test-event button').click();
   assert.equal(app.runtime.cycle.vote.total(),1);assert.equal(app.runtime.camps.view().total,2);
   await campScene.waitForFunction(()=>document.getElementById('scene-vote-footer').textContent.includes('肉包 4 票 / 鲸鱼娘 4 票'));
+  const voteSpace=await campScene.locator('.intermission').evaluate(el=>({bottom:el.getBoundingClientRect().bottom,stageBottom:document.getElementById('stage').getBoundingClientRect().bottom,contentBottom:document.getElementById('scene-vote-footer').getBoundingClientRect().bottom}));
+  assert.ok(voteSpace.bottom<=voteSpace.stageBottom-120&&voteSpace.contentBottom<=voteSpace.bottom,'场间投票也应保留底部空间且完整显示');
   await campScene.screenshot({path:path.join(output,'scene-camps-intermission.png')});await campScene.close();
   app.runtime.cycle.phase='idle';app.runtime.emit();
   await page.getByRole('button',{name:'模型与语音'}).click();
@@ -146,16 +151,48 @@ try{
   assert.equal(await page.locator('#scene-name-a').innerText(),'肉包');
   await page.screenshot({path:path.join(output,'scene.png')});
   const longText='这是用来检查长句字幕是否完整显示的内容，我们可以慢慢把一个条件说清楚。'.repeat(8).slice(0,260);
-  const captions=await import('../public/captions.js'),pages=captions.captionPages(longText);
+  const pages=await page.evaluate(async text=>{const {fitCaptionPages}=await import('/caption-layout.js');return fitCaptionPages(text,document.getElementById('scene-line'));},longText);
   let consumed=0;
   for(const text of pages){
     app.runtime.engine.state.scriptLine={side:'A',text:longText,at:Date.now()-(consumed+1)*1000,durationMs:longText.length*1000};app.runtime.emit();
     await page.waitForFunction(text=>document.getElementById('scene-line').textContent===text,text);
-    const box=await page.locator('#scene-line').evaluate(el=>({visible:el.clientHeight,full:el.scrollHeight,bottom:el.getBoundingClientRect().bottom,container:el.closest('.dialogue').getBoundingClientRect().bottom}));
+    const box=await page.locator('#scene-line').evaluate(el=>({visible:el.clientHeight,full:el.scrollHeight,bottom:el.getBoundingClientRect().bottom,container:el.closest('.dialogue-body').getBoundingClientRect().bottom}));
     assert.ok(box.full<=box.visible+1,'每页字幕应完整显示');assert.ok(box.bottom<=box.container,'字幕不能溢出对话框');
     consumed+=text.length;
   }
   await page.screenshot({path:path.join(output,'scene-long-caption.png')});
+  // Readable on a phone; each response owns the same fixed subtitle area.
+  await page.setViewportSize({width:390,height:844});
+  const previousLine=app.runtime.engine.state.scriptLine;
+  for(const kind of ['mention','gift','reaction','script']){
+    app.runtime.runner.reveal({side:'B',text:longText,durationMs:260000,emotion:'happy',audience:kind==='script'?undefined:{name:'观众甲'}},kind);app.runtime.emit();
+    await page.waitForFunction(kind=>{const tag=document.getElementById('scene-context');return kind==='script'?tag.hidden:!tag.hidden&&tag.dataset.kind===kind;},kind);
+    assert.equal(await page.locator('#scene-speaker').innerText(),'鲸鱼娘');
+    assert.equal(await page.locator('#scene-line').innerText(),pages[0]);
+    const measure=await page.locator('.dialogue').evaluate(el=>{const line=document.getElementById('scene-line'),body=line.parentElement,scale=document.getElementById('stage').getBoundingClientRect().width/540;return {font:parseFloat(getComputedStyle(line).fontSize)*scale,full:line.scrollHeight,available:body.clientHeight,lines:line.scrollHeight/parseFloat(getComputedStyle(line).lineHeight),top:el.getBoundingClientRect().top,panelBottom:document.querySelector('.camp-panel').getBoundingClientRect().bottom};});
+    assert.ok(measure.font>=15&&measure.font<=16,'手机字幕保持约15像素，避免字号过大');assert.ok(measure.lines<=3.1&&measure.full<=measure.available+1,'字幕完整呈现且最多三行');assert.ok(measure.top>=measure.panelBottom,'主字幕不能与礼物提示重叠');
+    assert.equal(await page.locator('#scene-receipt').count(),0,'回复不使用遮挡式浮卡');
+    await page.screenshot({path:path.join(output,'scene-phone-'+kind+'.png')});
+  }
+  const samples=[
+    '你说态度要到位，可工作明明都做完了，非得坐到晚上十点才算态度好？我承认交接要认真，可不能因为一个人还没走，就让所有人陪着。',
+    '这是没有标点的长句字幕'.repeat(15),
+    '中文混合 WWWWWWWWWWWW 英文以及🙂👍表情，不应在最后一行把字切掉。'.repeat(5),
+    '🙂👍'.repeat(70)
+  ];
+  for(const [sampleIndex,text]of samples.entries()){
+    const renderedPages=await page.evaluate(async text=>{const {fitCaptionPages}=await import('/caption-layout.js');return fitCaptionPages(text,document.getElementById('scene-line'));},text);
+    assert.equal(renderedPages.join(''),text,'所有页拼回后完整保留台词');let position=0;
+    for(const caption of renderedPages){
+      app.runtime.engine.state.scriptLine={side:'A',text,kind:'script',at:Date.now()-(position+0.5)*1000,durationMs:Array.from(text).length*1000};app.runtime.emit();
+      await page.waitForFunction(caption=>document.getElementById('scene-line').textContent===caption,caption);
+      const fit=await page.locator('#scene-line').evaluate(el=>{const range=document.createRange();range.selectNodeContents(el);const glyphs=range.getBoundingClientRect(),body=el.parentElement.getBoundingClientRect();return {glyphBottom:glyphs.bottom,bodyBottom:body.bottom,paragraph:el.scrollHeight,available:el.parentElement.clientHeight};});
+      assert.ok(fit.paragraph<=fit.available&&fit.glyphBottom<=fit.bodyBottom,'最后一行和字形完整处于字幕区内 '+JSON.stringify(fit));
+      if(sampleIndex===0&&position===0)await page.screenshot({path:path.join(output,'scene-caption-corrected.png')});
+      position+=Array.from(caption).length;
+    }
+  }
+  app.runtime.engine.state.scriptLine=previousLine;app.runtime.emit();
   assert.deepEqual(errors,[]);
   await writeFile(path.join(output,'scene-check.json'),JSON.stringify({ok:true,result,errors},null,2));
   console.log(JSON.stringify({ok:true,result,errors},null,2));
