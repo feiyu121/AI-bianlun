@@ -12,7 +12,7 @@ const dataDir=await mkdtemp(path.join(os.tmpdir(),'ai-bianlun-scene-'));
 const output=path.join(root,'.qa');await mkdir(output,{recursive:true});
 let app,browser;
 try{
-  app=await createApplication({root,dataDir,platformEnabled:false,edgeSpeech:async()=>({ok:true})});
+  app=await createApplication({root,dataDir,platformEnabled:false,edgeSpeech:async()=>({ok:true}),renderVoice:async()=>({url:'/audio/qa.mp3',durationMs:30000})});
   await new Promise(resolve=>app.server.listen(0,'127.0.0.1',resolve));
   const base='http://127.0.0.1:'+app.server.address().port;
   const executablePath=['C:/Program Files/Google/Chrome/Application/chrome.exe','C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe'].find(existsSync);
@@ -42,6 +42,28 @@ try{
     assert.ok(measure.opaque>1000,id+' 必须绘制可见模型像素');result.push({id,...measure});
   }
   await page.screenshot({path:path.join(output,'workbench.png'),fullPage:true});
+  assert.equal(await page.locator('#start-cycle').isDisabled(),true);
+  assert.equal(await page.locator('#repeat-library').isChecked(),false);
+  await page.locator('#open-library').click();
+  assert.equal(await page.locator('#tab-library').isVisible(),true);
+  await page.locator('#topic').selectOption(['slack','meeting']);await page.locator('#batch-count').fill('2');
+  const dialogue='我们先把这件事实际发生时的条件讲清楚，再看对方提出的办法是否真的有用。'.repeat(6);
+  await app.runtime.saveScript({id:'qa-library',topic:'会议应该怎样安排',topicId:'meeting',meta:{ready:true},turns:Array.from({length:44},(_,i)=>({act:Math.floor(i/4)+1,side:i%2?'B':'A',text:dialogue}))});
+  await page.getByRole('button',{name:'移出轮播',exact:true}).click();
+  await page.getByRole('button',{name:'加入轮播',exact:true}).waitFor();assert.equal(app.runtime.snapshot().library.available,0);
+  await page.getByRole('button',{name:'加入轮播',exact:true}).click();
+  await page.getByRole('button',{name:'移出轮播',exact:true}).waitFor();assert.equal(app.runtime.snapshot().library.available,1);
+  await page.getByRole('button',{name:'预合成配音',exact:true}).click();
+  await page.waitForFunction(()=>document.getElementById('library-operation').textContent.includes('整场配音已缓存'));
+  const sample={topic:'接住现场的一句话',turns:[{act:1,side:'A',text:'那我们先把条件讲清楚。'},{act:2,side:'B',text:'行，你先说说看。'}]};
+  await page.locator('#import-script').setInputFiles({name:'qa-short.json',mimeType:'application/json',buffer:Buffer.from(JSON.stringify(sample))});
+  const imported=page.locator('.script-row').filter({hasText:'接住现场的一句话'});await imported.waitFor();
+  assert.match(await imported.innerText(),/短样稿/);
+  await page.screenshot({path:path.join(output,'library.png'),fullPage:true});
+  await imported.getByRole('button',{name:'播放',exact:true}).click();
+  await page.locator('#stop:not([disabled])').waitFor();await page.locator('#stop').click();
+  await page.waitForFunction(()=>document.getElementById('operation').textContent.includes('已停止'));
+  assert.equal(app.runtime.runner.active,false);
   await page.getByRole('button',{name:'模型与语音'}).click();
   assert.equal(await page.locator('#tab-settings').isVisible(),true);
   await page.getByRole('button',{name:'直播间与防护'}).click();
