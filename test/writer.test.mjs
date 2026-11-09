@@ -56,6 +56,27 @@ function make(options={}){
  return {writer,box};
 }
 
+test('写稿进度依次报告大纲、分幕完成数、扩写与合并，累计台词与结果一致',async()=>{
+ const events=[],logs=[];
+ const {writer}=make({writer:{onProgress:event=>events.push(event),log:message=>logs.push(message)}});
+ const script=await writer.write();
+ assert.equal(events[0].phase,'outline');assert.ok(events.some(e=>e.phase==='refine'));assert.equal(events.at(-1).phase,'assemble');
+ assert.deepEqual(events.filter(e=>e.completedActs!==undefined).map(e=>e.completedActs),Array.from({length:11},(_,i)=>i+1));
+ assert.equal(events.at(-1).turns,script.turns.length);assert.equal(events.at(-1).chars,script.turns.reduce((sum,t)=>sum+t.text.length,0));
+ assert.equal(events.at(-1).estTotalSec,script.meta.estTotalSec);assert.ok(logs.some(line=>line.includes('第 11/11 幕')));
+});
+
+test('进度能显示同一幕重试，缺少有效句不会伪装成一次成功',async()=>{
+ const events=[],logs=[];const {writer}=make({short:label=>label===ACTS[0].label,writer:{onProgress:event=>events.push(event),log:message=>logs.push(message)}});
+ await writer.write();assert.ok(events.some(e=>e.phase==='act'&&e.act===1&&e.attempt===2));assert.ok(logs.some(line=>line.includes('准备重写')));
+});
+
+test('取消写稿立即退出，不重试模型或生成后续分幕和回退大纲',async()=>{
+ const controller=new AbortController(),logs=[];let calls=0;
+ const writer=new ScriptWriter({signal:controller.signal,log:message=>logs.push(message),complete:async()=>{calls++;controller.abort(new Error('手动停止'));throw new Error('请求取消');}});
+ await assert.rejects(writer.write(),/手动停止/);assert.equal(calls,1);assert.ok(!logs.some(line=>line.includes('内置幕骨架')));
+});
+
 test('整场结构：11 幕 59 句，反应位 51 个',async()=>{
  const {writer}=make();
  const script=await writer.write({});

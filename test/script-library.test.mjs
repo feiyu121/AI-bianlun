@@ -5,7 +5,7 @@ import os from 'node:os';
 import {fileURLToPath} from 'node:url';
 import {mkdtemp,rm,readFile,unlink} from 'node:fs/promises';
 import {ScriptLibrary,pickLibraryScripts} from '../lib/script-library.mjs';
-import {DebateRuntime} from '../lib/runtime.mjs';
+import {DebateRuntime,customTopic} from '../lib/runtime.mjs';
 import {ScriptWriter} from '../lib/script/writer.mjs';
 import {createApplication} from '../lib/http-app.mjs';
 
@@ -23,6 +23,66 @@ async function runtime(t,options={}){
   cleanup.set(dataDir,()=>app.close());return app;
 }
 const row=(id,topic=id,other={})=>({id,topic,autoReady:true,playCount:0,lastPlayedAt:'',...other});
+
+test('运行时实时发布模型等待、分幕统计、检查入库和配音进度，完成后结束计时',async t=>{
+  let release;const app=await runtime(t,{llm:{view:()=>({hasKey:true,active:1,queued:0}),complete:async()=>new Promise(resolve=>{release=resolve;})}});
+  t.mock.method(ScriptWriter.prototype,'write',async function(){
+    this.report('正在写第 1/11 幕',{phase:'act',act:1});await this.complete([]);
+    this.report('已处理 11/11 幕',{phase:'act',completedActs:11,totalActs:11,turns:44,chars:9000,estTotalSec:1800});return {...full(),topic:this.topic,sides:this.sides,meta:{}};
+  });
+  app.generateBatch({customTopics:['周末应该怎么过']});await until(()=>app.snapshot().generation.requestPending);
+  const waiting=app.snapshot().generation;assert.equal(waiting.state,'running');assert.equal(waiting.phase,'act');assert.ok(waiting.requestAt>0);assert.ok(app.engine.logs.some(row=>row.type==='generation'&&row.detail.includes('第 1/11 幕')));
+  release('模型已返回');await app.task;
+  const done=app.snapshot().generation;assert.equal(done.state,'completed');assert.equal(done.phase,'ready');assert.equal(done.requestPending,false);assert.equal(done.completedActs,11);assert.equal(done.turns,44);assert.equal(done.audioDone,6);assert.ok(done.finishedAt>=done.startedAt);
+  assert.equal(waiting.requestPending,true,'之前拿到的快照不会随完成状态改变');
+  for(const phrase of ['正在检查剧本','正在保存','起播配音已预热 6/6','剧本已就绪'])assert.ok(app.engine.logs.some(row=>row.detail.includes(phrase)),phrase);
+});
+
+test('写稿中停止与未达开播门槛分别显示取消和失败，不误报已就绪',async t=>{
+  const app=await runtime(t,{llm:{view:()=>({hasKey:true}),complete:(_m,{signal})=>new Promise((resolve,reject)=>signal.addEventListener('abort',()=>reject(signal.reason),{once:true}))}});
+  t.mock.method(ScriptWriter.prototype,'write',async function(){await this.complete([]);return {...full(),topic:this.topic,sides:this.sides,meta:{}};});
+  app.generateBatch({customTopics:['周末应该怎么过']});await until(()=>app.generation.requestPending);await app.stop();
+  assert.equal(app.generation.state,'cancelled');assert.equal(app.generation.requestPending,false);assert.ok(app.generation.finishedAt);assert.equal(app.scripts.length,0);
+  t.mock.method(ScriptWriter.prototype,'write',async function(){return {...short(),topic:this.topic,sides:this.sides,meta:{}};});
+  app.generateBatch({customTopics:['周末应该怎么过']});await app.task;
+  assert.equal(app.generation.state,'error');assert.equal(app.generation.phase,'not-ready');assert.equal(app.production.failed,1);assert.equal(app.scripts.length,1);assert.equal(app.scripts[0].ready,false);
+});
+
+test('自定义题目使用稳定编号，清理多余空格并拒绝非法输入',()=>{
+  assert.equal(customTopic('  一个人  住好不好？ ').id,customTopic('一个人 住好不好?').id);
+  assert.equal(customTopic('  一个人  住好不好？ ').topic,'一个人 住好不好？');
+  assert.match(customTopic('../自定义话题').id,/^custom-[a-f0-9]{16}$/);
+  for(const value of ['',null,123,'题'.repeat(101),'第一题\n第二题'])assert.throws(()=>customTopic(value),/辩题/);
+});
+
+test('自定义和推荐辩题可混合，按题名去重，空列表和超量提前拒绝',async t=>{
+  const app=await runtime(t),preset=app.topic('slack');
+  const topics=app.generationTopics({topicIds:['slack','slack'],customTopics:[preset.topic,'朋友借钱该不该收利息',' 朋友借钱该不该收利息 ' ]});
+  assert.equal(topics.length,2);assert.equal(topics[0].id,'slack');assert.match(topics[1].id,/^custom-/);
+  assert.throws(()=>app.generateBatch(),/请选择辩题或填写/);assert.throws(()=>app.generateBatch({customTopics:'不合法'}),/格式无效/);
+  assert.throws(()=>app.generateBatch({customTopics:Array.from({length:11},(_,i)=>'自定义问题'+i),count:2}),/20/);
+  await app.safety.configure({blockedTerms:['自定测试词']});assert.throws(()=>app.generateBatch({customTopics:['自定测试词']}),/屏蔽/);
+  await app.safety.configure({enabled:false});assert.equal(app.generationTopics({customTopics:['自定测试词']}).length,1);
+});
+
+test('只填自定义题也能批量生成入库，人物不绑定推荐题库立场，播放和选题沿用原题',async t=>{
+  const app=await runtime(t,{renderVoice:async()=>({url:'/audio/mock.mp3',durationMs:30000})}),seen=[];
+  t.mock.method(ScriptWriter.prototype,'write',async function(){seen.push({topic:this.topic,sides:this.sides});return {...full(),topic:this.topic,sides:this.sides,meta:{}};});
+  app.generateBatch({customTopics:['情侣之间该不该查看手机','游戏输了到底该怪谁'],count:2});await app.task;
+  assert.equal(app.production.succeeded,4);assert.equal(app.snapshot().library.available,4);
+  for(const item of seen)for(const side of item.sides){assert.equal(side.stance,'');assert.deepEqual(side.points,[]);}
+  const selected=app.scripts.find(row=>row.topic==='游戏输了到底该怪谁'),saved=await app.loadScript(selected.id);
+  assert.match(saved.topicId,/^custom-/);assert.equal(app.topic(saved.topicId).topic,saved.topic);
+  app.startSingle({scriptId:selected.id});await until(()=>app.runner.active);assert.equal(app.runner.topic,saved.topic);assert.equal(app.playingTopic.topic,saved.topic);assert.equal(app.runner.side('A').stance,'');await app.stop();
+  const played=[];app.play=async script=>played.push(script.topic);app.announce=async()=>{};app.cycle.sleep=async()=>{};
+  app.startCycle({topicId:saved.topicId,rounds:1});await app.task;assert.deepEqual(played,[saved.topic]);
+});
+
+test('自定义或导入剧本未带角色时，不回退到上班摸鱼的开场立场',async t=>{
+  const app=await runtime(t,{renderVoice:async()=>({url:'/audio/mock.mp3',durationMs:30000})}),script={...short(),topic:'周末该怎么过',topicId:'custom-weekend'};
+  await app.saveScript(script);app.startSingle({scriptId:script.id});await until(()=>app.runner.active);
+  for(const side of app.runner.sides){assert.equal(side.stance,'');assert.deepEqual(side.points,[]);}assert.equal(app.playingTopic.topic,script.topic);await app.stop();
+});
 
 test('库存优先未播，再按次数和上次播放时间选；同题每轮最多一个版本',()=>{
   const rows=[row('old','旧题',{playCount:2,lastPlayedAt:'2026-01-01'}),row('new1','新题'),row('new2','新题'),row('once','一次',{playCount:1,lastPlayedAt:'2026-02-01'}),row('disabled','停用',{autoReady:false})];
@@ -130,4 +190,31 @@ test('HTTP 支持入库、开关、预合成，导出原稿不混入播出统计
   assert.equal((await post('/api/scripts/audio',{scriptId:imported.scriptId})).status,200);await app.runtime.task;
   const exported=await fetch(base+'/api/scripts/export?id='+imported.scriptId).then(r=>r.json());assert.equal(exported.playCount,undefined);assert.equal(exported.turns.length,44);
   const html=await readFile(path.join(root,'public/index.html'),'utf8');assert.match(html,/id="tab-library"/);assert.ok(!html.includes('生成并播放单场'));
+});
+
+test('HTTP 防护开关重查库存，并同步控制语音检查与音频授权版本',async t=>{
+  const dataDir=await temporary(t);const app=await createApplication({root,dataDir,platformEnabled:false,edgeSpeech:async()=>({ok:true}),renderVoice:async()=>({url:'/audio/mock.mp3',durationMs:1})});
+  await new Promise(resolve=>app.server.listen(0,'127.0.0.1',resolve));cleanup.set(dataDir,()=>app.close());
+  const base='http://127.0.0.1:'+app.server.address().port,post=(url,body)=>fetch(base+url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+  await post('/api/safety',{blockedTerms:['自定测试词']});const script=full();script.turns[39].text+='自定测试词';await app.runtime.saveScript(script);
+  assert.equal(app.runtime.snapshot().library.available,0);
+  const off=await post('/api/safety',{enabled:false}).then(r=>r.json());assert.equal(off.safety.enabled,false);assert.equal(app.runtime.snapshot().library.available,1);
+  const item=app.runtime.engine.say('自定测试词');assert.equal(item.text,'自定测试词');
+  assert.equal((await post('/api/speech',{id:item.id})).status,200);assert.equal(app.runtime.safeAudio.get('/audio/mock.mp3'),app.runtime.safety.revision);
+  assert.equal((await post('/api/script/import',{script:{topic:'一次普通聊天',turns:[{side:'A',act:1,text:'自定测试词'}]}})).status,200);
+  const on=await post('/api/safety',{enabled:true}).then(r=>r.json());assert.equal(on.safety.enabled,true);assert.equal(app.runtime.snapshot().library.available,0);
+  assert.equal((await fetch(base+'/audio/mock.mp3')).status,403);app.runtime.engine.utterances.push(item);assert.equal((await post('/api/speech',{id:item.id})).status,400);
+  const settings=await fetch(base+'/api/safety').then(r=>r.json());assert.deepEqual(settings.blockedTerms,['自定测试词']);assert.equal(settings.enabled,true);
+});
+
+test('HTTP 支持纯自定义批量写稿与单题接口，导出保留自定义题目',async t=>{
+  const dataDir=await temporary(t);const app=await createApplication({root,dataDir,platformEnabled:false,edgeSpeech:async()=>({ok:true}),renderVoice:async()=>({url:'/audio/mock.mp3',durationMs:1})});
+  await new Promise(resolve=>app.server.listen(0,'127.0.0.1',resolve));cleanup.set(dataDir,()=>app.close());
+  t.mock.method(ScriptWriter.prototype,'write',async function(){return {...full(),topic:this.topic,sides:this.sides,meta:{}};});
+  const base='http://127.0.0.1:'+app.server.address().port,post=(url,body)=>fetch(base+url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+  assert.equal((await post('/api/scripts/generate-batch',{customTopics:['奶茶应该热着喝还是冰着喝'],count:2})).status,200);await app.runtime.task;
+  assert.equal(app.runtime.production.succeeded,2);const id=app.runtime.scripts[0].id;
+  const exported=await fetch(base+'/api/scripts/export?id='+id).then(r=>r.json());assert.equal(exported.topic,'奶茶应该热着喝还是冰着喝');assert.match(exported.topicId,/^custom-/);
+  assert.equal((await post('/api/script/generate',{topic:'朋友借钱该不该收利息'})).status,200);await app.runtime.task;assert.equal(app.runtime.scripts.length,3);
+  assert.equal((await post('/api/scripts/generate-batch',{customTopics:['题'.repeat(101)]})).status,400);
 });
