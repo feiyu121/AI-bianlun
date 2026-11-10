@@ -70,8 +70,8 @@ test('同一个人连着点名：替换成最新那句，不排队两次', () =>
  assert.equal(router.stats.replaced,1);
 });
 
-test('配额：播出去之后同一人整场不能再点名，别人不受影响', () => {
- const {router}=make();
+test('同一观众可以多次点名，只有 15 秒短暂冷却，其他观众不受影响', () => {
+ const {router,box}=make();
  const one=router.hear({userId:'u1',name:'老王',text:'肉包你怎么看'});
  router.commit(one.item);
  const blocked=router.hear({userId:'u1',name:'老王',text:'肉包再问一次'});
@@ -79,6 +79,11 @@ test('配额：播出去之后同一人整场不能再点名，别人不受影�
  assert.equal(blocked.reason,'quota');
  assert.equal(router.hear({userId:'u2',name:'小李',text:'肉包你怎么看'}).queued,true);
  assert.equal(router.stats.quota,1);
+ box.clock+=15000;
+ const next=router.hear({userId:'u1',name:'老王',text:'肉包那你再说说'});
+ assert.equal(next.queued,true,'同一场还可以继续问');
+ router.commit(next.item);box.clock+=15000;
+ assert.equal(router.hear({userId:'u1',name:'老王',text:'鲸鱼娘你怎么看'}).queued,true);
 });
 
 test('生成失败要退还配额：不能因为模型挂了，这个人整场都说不上话', () => {
@@ -89,14 +94,24 @@ test('生成失败要退还配额：不能因为模型挂了，这个人整场�
  assert.equal(router.hear({userId:'u1',name:'老王',text:'肉包你说说'}).queued,true,'退了配额就该能再点');
 });
 
-test('投票期放宽到 5 分钟滚动：暖场八分钟一人只能问一次会冷场', () => {
+test('场间点名同样只冷却 15 秒，不再等 5 分钟', () => {
  const {router,box}=make();
  const one=router.hear({userId:'u1',name:'老王',text:'肉包你怎么看',phase:'vote'});
  router.commit(one.item);
- box.clock+=4*60000;
+ box.clock+=14000;
  assert.equal(router.hear({userId:'u1',name:'老王',text:'肉包再问',phase:'vote'}).reason,'quota');
- box.clock+=1*60000+1000;
+ box.clock+=1000;
  assert.equal(router.hear({userId:'u1',name:'老王',text:'肉包再问',phase:'vote'}).queued,true);
+});
+
+test('点名队列优先未被回应的新观众，老观众仍保留在候选队列',()=>{
+ const {router,box}=make();
+ const first=router.hear({userId:'old',name:'老观众',text:'肉包你怎么看'});
+ router.plan();router.commit(first.item);box.clock+=15000;
+ router.hear({userId:'old',name:'老观众',text:'肉包还有呢'});box.clock++;
+ router.hear({userId:'new',name:'新观众',text:'肉包我也想问'});
+ assert.equal(router.plan({max:1})[0].userId,'new');
+ assert.equal(router.items[0].userId,'old');
 });
 
 test('到点取人：分数高的先上，一个槽最多两条', () => {

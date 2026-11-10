@@ -59,13 +59,15 @@ test('连填不超限：连回 2 次后第 3 格强制空，空过再恢复',()=
  assert.equal(Math.max(...longest.map(s=>s.split(',').length)),2,'结构上不可能连三段');
 });
 
-test('reaction:false 的位置不设槽：冷开场与结辩幕整段静默',()=>{
+test('冷开场与收尾不填气氛句，但真实弹幕可正常回应',()=>{
  const {stage}=fixture({n:4,reaction:i=>i!==1});
  for(let i=0;i<4;i++)stage.hear(comment(i,'摸鱼这事我得说两句'+i));
  const out=stage.advance(Infinity);
- const skippedAt=BASE+stage.timeline[1].endMs;
- assert.equal(out.some(x=>x.at===skippedAt),false,'这一格根本没有产出');
- assert.equal(stage.stats.slots,3);
+ assert.equal(out.some(x=>x.index===1&&x.kind==='reply'),true);
+ assert.equal(stage.stats.slots,4);
+ const quiet=fixture({n:2,reaction:false}).stage;
+ for(let i=0;i<30;i++)quiet.hear(comment(i,'？')); // 计热度，但没有有效问题
+ assert.equal(quiet.advance(Infinity).length,0,'不因房间热度填充固定气氛句');
 });
 
 test('跨幕作废：上一幕没被选中的弹幕不会在下一幕开口',()=>{
@@ -168,8 +170,8 @@ test('换场 reset 保留审计数字，便于对比两场',()=>{
  assert.equal(stage.router.pool.size,0);
 });
 
-test('生成慢过 12 秒就不要了：迟到的回复等于答非所问',()=>{
- const {stage}=fixture({n:1,genMs:()=>20000,library:fakeLibrary({A:['库里的兜底句'],B:[]})});
+test('生成慢过 30 秒就不要了：迟到的回复等于答非所问',()=>{
+ const {stage}=fixture({n:1,genMs:()=>40000,library:fakeLibrary({A:['库里的兜底句'],B:[]})});
  stage.hear(comment(1,'你们老板同意吗'));
  const [hit]=stage.advance(BASE+27000);
  assert.equal(hit.kind,'bubble','赶不上的不排队，不用通用句冒充回答');
@@ -219,6 +221,16 @@ test('settle：接话实际只花 1 秒，就别往时间轴上记 3.5 秒',()=>
  assert.equal(stage.slipMs,1000);
 });
 
+test('真实播放器空隙回写时间轴，不把后续几个句间位置提前消费',()=>{
+ const {stage,box}=fixture({n:3});
+ stage.hear(comment(1));
+ box.clock=BASE+35000;
+ assert.equal(stage.alignEnd(0,box.clock),8000);
+ assert.equal(stage.advance(box.clock,{max:1})[0].kind,'reply');
+ assert.equal(stage.cursor,1);
+ assert.equal(stage.advance(box.clock).length,0);
+});
+
 test('overrun：落后两格时一次只接一句，多出来的格子作废但不扣配额',()=>{
  const {stage}=fixture({n:5});
  for(let i=0;i<5;i++)stage.hear(comment(i,'摸鱼这事我得说两句'+i));
@@ -230,7 +242,7 @@ test('overrun：落后两格时一次只接一句，多出来的格子作废但�
  assert.equal(stage.router.pool.size,4,'人还在池里等下一格');
 });
 
-test('异步写手：写好之后才判命中，慢过 12 秒判废',async()=>{
+test('临近句尾收到的弹幕保留到下一句，沿用生成时的人物音色且只回应一次',async()=>{
  const box={clock:BASE};
  let resolve=null;
  const stage=new ReactionStage({
@@ -239,17 +251,79 @@ test('异步写手：写好之后才判命中，慢过 12 秒判废',async()=>{
   draft:()=>new Promise(done=>{resolve=done;})
  });
  stage.attach(scriptOf(2));
+ box.clock=BASE+25000;
  stage.hear(comment(1,'你们老板同意吗'));
- // 还没写好：位置到了也只能降级（气泡），不能拿半句空话去播。
- assert.equal(stage.advance(BASE+27000)[0].kind,'bubble');
- // 同一个人的第二条重来一次：这次按时写好。
+ box.clock=BASE+27000;
+ const waiting=stage.advance(box.clock)[0];
+ assert.equal(waiting.kind,'skip');
+ assert.equal(waiting.reason,'generating');
+ assert.equal(stage.router.pool.size,1,'未写好不丢弃、不扣配额');
+ assert.equal(stage.router.stats.dropped,0);
  box.clock=BASE+28000;
- stage.hear(comment(2,'你们老板同意吗'));
  resolve('这题我不让，老板同不同意都得说');
  await Promise.resolve();
  const out=stage.advance(BASE+54000);
  assert.equal(out[0].layer,'L1');
  assert.equal(out[0].text,'这题我不让，老板同不同意都得说');
+ assert.equal(out[0].side,'A','下一格轮到 B，也不能把 A 的回复交给 B 念');
+ assert.equal(stage.router.stats.replied,1);
+ assert.equal(stage.jobs.size,0);
+});
+
+test('待生成弹幕不挡住另一位已经生成好的回复',async()=>{
+ const box={clock:BASE};
+ const stage=new ReactionStage({now:()=>box.clock,draft:item=>item.userId==='u1'?new Promise(()=>{}):Promise.resolve('那我就先接你这句。')});
+ stage.attach(scriptOf(3));
+ stage.hear(comment(1,'这句还在模型排队'));
+ stage.hear(comment(2,'这句已经可以回答'));
+ await Promise.resolve();
+ const [hit]=stage.advance(BASE+27000);
+ assert.equal(hit.kind,'reply');assert.equal(hit.item.userId,'u2');
+ assert.equal(stage.router.pool.has('u1'),true);
+});
+
+test('模型一直不返回时到期清理；迟到结果不会再被播出',async()=>{
+ const box={clock:BASE};let resolve;
+ const stage=new ReactionStage({now:()=>box.clock,draft:()=>new Promise(done=>{resolve=done;})});
+ stage.attach(scriptOf(3));stage.hear(comment(1));
+ assert.equal(stage.advance(BASE+27000)[0].reason,'generating');
+ box.clock=BASE+54000;
+ assert.equal(stage.advance(box.clock)[0].kind,'bubble');
+ assert.equal(stage.router.pool.size,0);assert.equal(stage.jobs.size,0);
+ assert.equal(stage.stats.slow,1);
+ resolve('已经迟到的回复。');await Promise.resolve();
+ assert.equal(stage.advance(BASE+81000).some(row=>row.kind==='reply'),false);
+ assert.equal(stage.stats.slow,1);
+});
+
+test('两字问候入池，单字不触发模型',()=>{
+ const {stage}=fixture();
+ assert.equal(stage.hear(comment(1,'你好')).ok,true);
+ assert.equal(stage.hear(comment(2,'哈哈')).ok,true);
+ assert.equal(stage.hear(comment(3,'？')).reason,'too-short');
+});
+
+test('普通接话只冷却 15 秒，同一场同一观众可以多次被回应',()=>{
+ const {stage,box}=fixture();
+ stage.hear(comment(1,'你好'));stage.advance(BASE+27000);
+ box.clock=BASE+10000;
+ assert.equal(stage.hear(comment(1,'还在吗')).reason,'quota');
+ assert.equal(stage.jobs.size,0);
+ box.clock=BASE+15000;
+ assert.equal(stage.hear(comment(1,'还在吗')).ok,true);
+ const next=stage.advance(BASE+54000+stage.slipMs);
+ assert.equal(next.filter(row=>row.kind==='reply').length,1);
+ assert.equal(stage.router.stats.replied,2);
+});
+
+test('有新观众候选时先回应新人，已被回应的观众仍有机会',()=>{
+ const {stage,box}=fixture({n:5});
+ stage.hear(comment(1,'摸鱼摸鱼这事我得说两句！！！'));stage.advance(BASE+27000);
+ box.clock=BASE+30000;
+ stage.hear(comment(1,'摸鱼摸鱼这事我还想说！！！'));
+ stage.hear(comment(2,'我也来聊几句'));
+ const replies=stage.advance(Infinity).filter(row=>row.kind==='reply');
+ assert.deepEqual(replies.map(row=>row.item.userId),['u2','u1']);
 });
 
 test('seek：跳幕把零点重新钉在现在，不会一次补播一串接话',()=>{

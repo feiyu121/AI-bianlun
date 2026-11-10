@@ -38,6 +38,22 @@ test('运行时实时发布模型等待、分幕统计、检查入库和配音�
   for(const phrase of ['正在检查剧本','正在保存','起播配音已预热 6/6','剧本已就绪'])assert.ok(app.engine.logs.some(row=>row.detail.includes(phrase)),phrase);
 });
 
+test('互动记录接收、生成成功和失败原因，模型超时不再静默',async t=>{
+ let options,fail=false;
+ const app=await runtime(t,{llm:{view:()=>({hasKey:true}),complete:async(_messages,o)=>{options=o;if(fail)throw new Error('模型接口超时');return '在呢，你刚才在说什么？';}}});
+ app.runner.attach(short());app.runner.active=true;
+ const result=await app.receive({type:'comment',userId:'viewer',name:'观众',text:'你好'});
+ assert.equal(result.ok,true);
+ await new Promise(resolve=>setImmediate(resolve));
+ assert.equal(options.timeoutMs,25000);
+ assert.ok(app.engine.logs.some(row=>row.type==='interaction'&&row.detail.includes('收到弹幕：你好')));
+ assert.ok(app.engine.logs.some(row=>row.detail.includes('弹幕接话已生成')));
+ fail=true;
+ assert.equal(await app.draft('reaction',{text:'你在聊什么'},null,'A'),'');
+ assert.ok(app.engine.logs.some(row=>row.detail.includes('弹幕接话失败：模型接口超时')));
+ app.runner.active=false;
+});
+
 test('写稿中停止与未达开播门槛分别显示取消和失败，不误报已就绪',async t=>{
   const app=await runtime(t,{llm:{view:()=>({hasKey:true}),complete:(_m,{signal})=>new Promise((resolve,reject)=>signal.addEventListener('abort',()=>reject(signal.reason),{once:true}))}});
   t.mock.method(ScriptWriter.prototype,'write',async function(){await this.complete([]);return {...full(),topic:this.topic,sides:this.sides,meta:{}};});

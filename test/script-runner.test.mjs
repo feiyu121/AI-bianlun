@@ -79,7 +79,7 @@ function make({n=4,voice=null,lookahead=2,prewarm=2,script=null,voiceExpected=()
   // 把主循环跑到底：每次挂起的 sleep 都推到底。
   async step(){await flush();const job=pending.shift();if(!job)return false;clock+=job.ms;job.resolve();await flush();return true;},
   async playOut(max=200){for(let i=0;i<max;i++)if(!await box.step())break;},
-  tick(ms){clock+=ms;}
+  tick(ms,{withinSleep=false}={}){clock+=ms;if(withinSleep&&pending[0])pending[0].ms=Math.max(0,pending[0].ms-ms);}
  };
  runner.attach(script||scriptOf(n,{actOf}));
  return box;
@@ -89,6 +89,162 @@ function make({n=4,voice=null,lookahead=2,prewarm=2,script=null,voiceExpected=()
 // 6 轮而不是 3 轮：点名槽那条链有「取文本 → 合成 → 发布」三次挂起，
 // 3 轮只能推到「文本拿到了」，断言会看到一条还没发布的空记录。
 async function flush(){for(let i=0;i<6;i++)await new Promise(resolve=>setImmediate(resolve));}
+
+// 主线立即就绪，互动配音由测试控制，模拟文字先完成、音频仍在处理。
+function delayedReplyVoice(){
+ const pending=new Map(),calls=[];
+ return {pending,calls,render(item){
+  calls.push(item);
+  if(!item.interactive)return Promise.resolve({url:'/audio/main.mp3',durationMs:1000});
+  return new Promise((resolve,reject)=>pending.set(item.text,{resolve:()=>resolve({url:'/audio/reply.mp3',durationMs:1000}),reject}));
+ }};
+}
+
+test('文字已写好但配音未完成时继续主线，不扣冷却；音频就绪后只插入一次',async()=>{
+ const voice=delayedReplyVoice(),reply='这份工作值不值得做，得看条件。';
+ const {runner,engine,step,playOut}=make({n:5,voice,draft:async()=>reply});
+ await runner.start();runner.comment({userId:'u1',name:'甲',text:'摸鱼这事你们怎么看'});await flush();
+ await step();
+ assert.equal(engine.utterances.at(-1).kind,'debate');
+ assert.equal(runner.cursor,1,'下一句主线已开口，没有停在配音等待上');
+ assert.equal(runner.receipts.length,0);assert.equal(runner.stage.stats.replied,0);
+ assert.equal(runner.stage.router.repliedAt.has('u1'),false);
+ voice.pending.get(reply).resolve();await flush();
+ assert.equal(engine.utterances.filter(item=>item.kind==='reaction').length,0,'不打断正在播放的句子');
+ await step();
+ const said=engine.utterances.find(item=>item.kind==='reaction');
+ assert.equal(said.audio,'/audio/reply.mp3');assert.equal(said.speaker,'A','沿用生成时的人物');
+ await playOut();
+ assert.equal(engine.utterances.filter(item=>item.kind==='reaction').length,1);
+ assert.equal(voice.calls.filter(item=>item.text===reply).length,1,'开口不重新合成');
+ assert.equal(runner.stats.maxGap,0);
+});
+
+test('慢配音不挡住其他已就绪观众，也不提前记录慢回复成功',async()=>{
+ const voice=delayedReplyVoice();
+ const {runner,engine,step,playOut}=make({n:6,voice,draft:async item=>'回复'+item.name});
+ await runner.start();
+ runner.comment({userId:'slow',name:'甲',text:'摸鱼到底算不算本事'});
+ runner.comment({userId:'fast',name:'乙',text:'摸鱼要看什么情况'});await flush();
+ voice.pending.get('回复乙').resolve();await flush();await step();
+ assert.equal(engine.utterances.at(-1).text,'回复乙');
+ assert.equal(runner.stage.router.repliedAt.has('slow'),false);
+ voice.pending.get('回复甲').resolve();await playOut();
+ assert.deepEqual(engine.utterances.filter(item=>item.kind==='reaction').map(item=>item.text),['回复乙','回复甲']);
+});
+
+for(const kind of ['mention','gift']){
+ test(`${kind}：幕间不等待文字或配音，就绪后再接入`,async()=>{
+  const voice=delayedReplyVoice();let finish;
+  const options={n:6,voice,actOf:i=>Math.floor(i/2)+1};
+  if(kind==='mention'){options.mention=true;options.mentionDraft=()=>new Promise(resolve=>{finish=resolve;});}
+  else{options.gifts=true;options.giftDraft=()=>new Promise(resolve=>{finish=resolve;});}
+  const {runner,engine,router,gifts,step,playOut}=make(options);
+  await runner.start();
+  if(kind==='mention')runner.comment({userId:'u1',name:'甲',text:'肉包你怎么看'});
+  else runner.gift({gift:'sunglasses',userId:'u1',name:'甲'});
+  await step();await step();
+  assert.equal(runner.cursor,2,'幕间文字未完成也继续下一幕');
+  assert.equal(engine.utterances.filter(item=>item.kind===kind).length,0);
+  finish('这句准备好了再说。');await flush();await step();
+  assert.equal(runner.cursor,3,'文字完成、音频未完成仍继续主线');
+  assert.equal(runner.receipts.length,0);
+  assert.equal(kind==='mention'?router.stats.replied:gifts.stats.played,0);
+  voice.pending.get('这句准备好了再说。').resolve();await flush();await step();
+  const said=engine.utterances.find(item=>item.kind===kind);
+  assert.ok(said);assert.equal(said.audio,'/audio/reply.mp3');
+  await playOut();assert.equal(engine.utterances.filter(item=>item.kind===kind).length,1);
+ });
+}
+
+test('互动配音失败或无音频地址时不播放无声回复、不扣普通和点名冷却',async()=>{
+ for(const kind of ['reaction','mention'])for(const empty of [false,true]){
+  const voice={render:async item=>{if(item.interactive){if(empty)return {};throw new Error('测试配音失败');}return {url:'/audio/main.mp3',durationMs:1000};}};
+  const {runner,engine,router,playOut}=make({n:4,voice,mention:kind==='mention',draft:async()=>'可以换一个角度。',mentionDraft:async()=>'可以换一个角度。'});
+  await runner.start();runner.comment({userId:'u1',name:'甲',text:kind==='mention'?'肉包你怎么看':'你们怎么看这个问题'});
+  await playOut();
+  assert.equal(engine.utterances.filter(item=>item.kind===kind).length,0);
+  assert.equal((router||runner.stage.router).repliedAt.has('u1'),false);
+  assert.equal(engine.utterances.filter(item=>item.kind==='debate').length,4);
+  assert.equal(runner.stats.maxGap,0);
+ }
+});
+
+test('礼物配音失败在后台重试，下一幕使用新音频，不重复播出',async()=>{
+ let attempts=0;
+ const voice={render:async item=>{if(item.interactive&&++attempts===1)throw new Error('第一次失败');return {url:'/audio/ok.mp3',durationMs:1000};}};
+ const {runner,engine,gifts,playOut}=make({n:6,voice,actOf:i=>Math.floor(i/2)+1,gifts:true,giftDraft:async()=>'我们再算一次。'});
+ await runner.start();runner.gift({gift:'sunglasses',userId:'u1',name:'甲'});await playOut();
+ assert.equal(attempts,2);assert.equal(gifts.stats.retried,1);assert.equal(gifts.stats.played,1);
+ assert.equal(engine.utterances.filter(item=>item.kind==='gift').length,1);
+ assert.equal(runner.stats.maxGap,0);
+});
+
+test('点名换问题后旧配音迟到，只能播放新问题的音频',async()=>{
+ const voice=delayedReplyVoice();
+ const {runner,engine,step,playOut}=make({n:5,voice,mention:true,mentionDraft:async item=>item.text.includes('第一个')?'旧问题答案':'新问题答案'});
+ await runner.start();runner.comment({userId:'u1',name:'甲',text:'肉包第一个问题'});await flush();
+ runner.comment({userId:'u1',name:'甲',text:'肉包换一个问题'});await flush();
+ voice.pending.get('旧问题答案').resolve();await flush();await step();
+ assert.equal(engine.utterances.filter(item=>item.kind==='mention').length,0);
+ voice.pending.get('新问题答案').resolve();await flush();await step();await playOut();
+ assert.deepEqual(engine.utterances.filter(item=>item.kind==='mention').map(item=>item.text),['新问题答案']);
+});
+
+for(const action of ['resume','stop'])test(`${action} 后迟到的互动音频不会恢复旧回复`,async()=>{
+ const voice=delayedReplyVoice();
+ const {runner,engine,playOut}=make({n:5,voice,mention:true,gifts:true,draft:async()=>'弹幕答案',mentionDraft:async()=>'点名答案',giftDraft:async()=>'礼物答案'});
+ await runner.start();runner.comment({userId:'r',name:'甲',text:'你们怎么看这个问题'});
+ runner.comment({userId:'m',name:'乙',text:'肉包你怎么看'});runner.gift({gift:'sunglasses',userId:'g',name:'丙'});await flush();
+ if(action==='resume'){runner.pause();runner.resume();}else runner.stop();
+ for(const pending of voice.pending.values())pending.resolve();await flush();await playOut();
+ assert.equal(engine.utterances.filter(item=>['reaction','mention','gift'].includes(item.kind)).length,0);
+});
+
+test('配音超时后不复活普通回复，也不阻塞主线',async()=>{
+ const voice=delayedReplyVoice();
+ const {runner,engine,step,tick,playOut}=make({n:5,voice,draft:async()=>'超时的答案'});
+ await runner.start();runner.comment({userId:'u1',name:'甲',text:'摸鱼这事你怎么看'});await flush();
+ tick(31000,{withinSleep:true});await step();await step();
+ voice.pending.get('超时的答案').resolve();await playOut();
+ assert.equal(engine.utterances.filter(item=>item.kind==='reaction').length,0);
+ assert.equal(runner.stage.router.repliedAt.has('u1'),false);
+ assert.equal(engine.utterances.filter(item=>item.kind==='debate').length,5);
+});
+
+test('可选社交备用句也在配音就绪后入选',async()=>{
+ const voice=delayedReplyVoice();let picked=0;
+ const {runner,engine,step,playOut}=make({n:5,voice,draft:async()=>{throw new Error('模型失败');}});
+ runner.stage=runner.createStage({pick:()=>++picked===1?'笑得够开心。':null});
+ runner.attach(runner.script);
+ await runner.start();runner.comment({userId:'u1',name:'甲',text:'哈哈哈哈'});await flush();await step();
+ assert.equal(engine.utterances.at(-1).kind,'debate');
+ assert.equal(runner.stage.router.repliedAt.has('u1'),false);
+ assert.ok(voice.pending.has('笑得够开心。'));
+ voice.pending.get('笑得够开心。').resolve();await flush();await step();await playOut();
+ assert.equal(engine.utterances.filter(item=>item.kind==='reaction').length,1);
+ assert.equal(engine.utterances.find(item=>item.kind==='reaction').audio,'/audio/reply.mp3');
+});
+
+test('已经配音完成的回复不因等自然停顿超过 30 秒而误判超时',async()=>{
+ const voice=fakeVoice({ms:40000});
+ const {runner,engine,step,playOut}=make({n:3,voice,draft:async()=>'这句早已准备好了。'});
+ await runner.start();runner.comment({userId:'u1',name:'甲',text:'你们怎么看这个问题'});await flush();await step();
+ assert.equal(engine.utterances.at(-1).kind,'reaction');await playOut();
+ assert.equal(runner.stage.stats.failed,0);
+});
+
+for(const kind of ['mention','gift'])test(`${kind}：配音尚未完成的队首不挡住已准备好的观众`,async()=>{
+ const voice=delayedReplyVoice();
+ const {runner,engine,playOut}=make({n:6,voice,actOf:i=>Math.floor(i/2)+1,mention:kind==='mention',gifts:kind==='gift',mentionDraft:async item=>'回复'+item.name,giftDraft:async item=>'回复'+item.name});
+ await runner.start();
+ for(const name of ['甲','乙']){
+  if(kind==='mention')runner.comment({userId:name,name,text:'肉包你怎么看'});
+  else runner.gift({gift:'sunglasses',userId:name,name});
+ }
+ await flush();voice.pending.get('回复乙').resolve();await flush();await playOut();
+ assert.deepEqual(engine.utterances.filter(item=>item.kind===kind).map(item=>item.text),['回复乙']);
+});
 
 test('装剧本：时长优先用预渲染的实测值，没有才退回 estSec',()=>{
  const {runner}=make({script:{turns:[
@@ -181,14 +337,37 @@ test('接话不进剧本上下文：观众不是第三辩手',async()=>{
  assert.equal(reaction.speaker,'A','接话用当前说话那一方的音色');
 });
 
-test('reaction:false 的位置不设槽：冷开场整段不接话',async()=>{
+test('长段开场拆成短停顿，回复提前配音；生成 3 秒后最近停顿开口，主线完整保留',async()=>{
+ let finish;
+ const text='先把这件事情说清楚。'.repeat(15),reply='看得到，你接着说。',calls=[];
+ const voice={render:async item=>{calls.push(item.text);return {url:'/audio/'+calls.length+'.mp3',durationMs:Math.round(Array.from(item.text).length/4.9*1000)};}};
+ const {runner,engine,step,playOut,tick}=make({voice,
+  script:{id:'long',topic:'一次日常讨论',turns:[{id:'long-1',act:1,side:'A',text,reaction:false}]},
+  draft:()=>new Promise(resolve=>{finish=resolve;})});
+ await runner.start();
+ await flush();
+ const receivedAt=runner.now();
+ runner.comment({name:'观众',userId:'viewer',text:'能看到我这句话吗'});
+ tick(3000,{withinSleep:true});finish(reply);await flush();
+ assert.equal(calls.filter(value=>value===reply).length,1,'主线还没结束，互动配音已经做完');
+ assert.equal(engine.utterances.some(item=>item.kind==='reaction'),false,'等自然停顿再播');
+ await step();
+ const said=engine.utterances.find(item=>item.kind==='reaction');
+ assert.ok(said,'开场的第一个停顿即可接话');
+ assert.ok(Date.parse(said.at)-receivedAt<10000,'不再等整段几十秒或开场整幕');
+ await playOut();
+ assert.equal(calls.filter(value=>value===reply).length,1,'开口时复用已合成回复');
+ assert.equal(engine.utterances.filter(item=>item.kind==='debate').map(item=>item.text).join(''),text);
+});
+
+test('冷开场仍回应真实弹幕，不因 reaction:false 等到整幕结束',async()=>{
  const {runner,engine,step,playOut}=make({script:scriptOf(3,{reaction:i=>i!==0})});
  await runner.start();
  runner.comment({name:'甲',userId:'u1',text:'开场这句我就不服'});
- await step();                          // 第一句播完——这一格没有槽
- assert.equal(engine.utterances.filter(item=>item.kind==='reaction').length,0);
+ await step();
+ assert.equal(engine.utterances.filter(item=>item.kind==='reaction').length,1);
  await playOut();
- assert.equal(runner.stage.stats.slots,2,'三句里只有两格设了槽');
+ assert.equal(runner.stage.stats.slots,3);
 });
 
 test('暂停：游标停在原地，暂停期间弹幕只上墙，恢复后接着播且不补播',async()=>{
@@ -336,7 +515,7 @@ test('回执只留最近 12 条：一场几百条会把快照撑肥',async()=>{
  assert.ok(runner.receipts.length<=12);
 });
 
-test('点名：写在换幕那一刻，不插在幕中间',async()=>{
+test('点名写好后在最近句间开口，用被点角色的音色',async()=>{
  const {runner,engine,router,step}=make({
   n:4,actOf:i=>i<2?1:2,mention:true,
   mentionDraft:async()=>'你问的这句我记着：摸鱼不是偷时间，是把被切碎的时间拼回来。'
@@ -345,10 +524,8 @@ test('点名：写在换幕那一刻，不插在幕中间',async()=>{
  runner.comment({name:'老王',userId:'u1',text:'肉包你怎么看'});
  assert.equal(router.size,1);
  await step();
- assert.equal(engine.utterances.filter(item=>item.kind==='mention').length,0,'第 1 幕还没完，不能插话');
- await step();
  const said=engine.utterances.filter(item=>item.kind==='mention');
- assert.equal(said.length,1,'换幕那一刻才出声');
+ assert.equal(said.length,1,'不用等换幕');
  assert.equal(said[0].name,'肉包');
  assert.ok(said[0].text.includes('拼回来'));
  // 回执在开口那一刻就写：弹幕墙要跟着这句话一起钉住那条弹幕。
@@ -356,6 +533,33 @@ test('点名：写在换幕那一刻，不插在幕中间',async()=>{
  assert.equal(runner.receipts.at(-1).name,'老王');
  await step();
  assert.equal(router.repliedAt.get('u1')>0,true,'整句说完才扣配额');
+});
+
+test('长幕点名不强制等待 30 秒，首个句间就可回应且只说一次',async()=>{
+ const {runner,engine,router,step,playOut}=make({n:12,mention:true,mentionDraft:async()=>'刚才在聊猴子和铠，你站哪边？'});
+ await runner.start();
+ runner.comment({name:'观众',userId:'u1',text:'肉包你在干嘛'});
+ await step();
+ assert.equal(engine.utterances.filter(item=>item.kind==='mention').length,1);
+ assert.equal(runner.cursor,1,'整幕还有十一句，不额外等 30 秒');
+ await playOut();
+ assert.equal(router.stats.replied,1);
+ assert.equal(engine.utterances.filter(item=>item.kind==='mention').length,1,'不能幕末重复回答');
+});
+
+test('点名改问新问题时，旧生成完成不能覆盖新问题的回复',async()=>{
+ const finish=[];
+ const {runner,engine,router,step,playOut}=make({n:5,mention:true,mentionDraft:()=>new Promise(resolve=>finish.push(resolve))});
+ await runner.start();
+ runner.comment({userId:'viewer',name:'观众',text:'肉包第一个问题'});await flush();
+ const old=router.items[0];
+ runner.comment({userId:'viewer',name:'观众',text:'肉包换一个问题'});await flush();
+ const current=router.items[0];assert.notEqual(current,old);
+ finish[0]('这是旧的答案。');await flush();assert.equal(current.ready,'');
+ finish[1]('这是新的答案。');await flush();await step();
+ const spoken=engine.utterances.filter(item=>item.kind==='mention');
+ assert.equal(spoken.length,1);assert.equal(spoken[0].text,'这是新的答案。');
+ await playOut();
 });
 
 test('点名：写不出来就放弃这一条，配额退还',async()=>{
@@ -440,13 +644,14 @@ test('礼物：写废了排回下一幕重写，钱不白花',async()=>{
  assert.equal(tries,2,'重写要真的再调一次写手');
 });
 
-test('礼物优先于点名：花了钱的先上',async()=>{
+test('同一幕间收到的礼物与点名，礼物优先',async()=>{
  const {runner,engine,step}=make({
   n:4,actOf:i=>i<2?1:2,mention:true,gifts:true,
   mentionDraft:async()=>'你问的这句我记着：摸鱼不是偷时间，是把被切碎的时间拼回来。',
   giftDraft:async()=>'账这个字你抓得紧，那就把八小时摊开来算，谁在替谁的时间付钱。'
  });
  await runner.start();
+ await step(); // 先到本幕最后一段，再同时收到两类互动
  runner.gift({gift:'sunglasses',count:1,name:'老王',userId:'u1'});
  runner.comment({name:'小李',userId:'u2',text:'肉包你怎么看'});
  // 三句：礼物句要说完，之后才轮到点名句。少推一次就只能看到礼物。

@@ -77,7 +77,29 @@ test('运行失败释放场次状态，不会锁死工作台',async t=>{
 test('无模型时社交弹幕上墙，不循环播放三句固定人设台词',async t=>{
   const app=await runtime(t);app.startSingle({script:sample()});await until(()=>app.runner.active);
   app.runner.stage.hear({userId:'praise',name:'观众',text:'哈哈哈哈'});
+  await new Promise(resolve=>setImmediate(resolve)); // 等无模型错误结算；待生成时会保留到后续句间
   const hits=app.runner.stage.advance(Infinity);assert.ok(hits.some(row=>row.kind==='bubble'));assert.equal(hits.some(row=>row.kind==='reply'),false);await app.stop();
+});
+
+test('正式开播入口：互动文字和配音在后台准备，齐备后才插入',async t=>{
+ let finishAudio,audioCalls=0;
+ const app=await runtime(t,{
+  llm:{view:()=>({hasKey:true}),complete:async()=> '这个角度我愿意再想想。'},
+  renderVoice:async item=>{
+   if(item.interactive){audioCalls++;return new Promise(resolve=>{finishAudio=()=>resolve({url:'/audio/reply.mp3',durationMs:20});});}
+   return {url:'/audio/main.mp3',durationMs:200};
+  }
+ });
+ const script={topic:'工作怎么安排',turns:Array.from({length:5},(_,i)=>({act:1,side:i%2?'B':'A',text:'先把工作怎么安排说清楚。'}))};
+ app.startSingle({script});await until(()=>app.engine.utterances.length===1);
+ const result=app.runner.comment({userId:'u1',name:'观众',text:'这个条件能不能再想想'});
+ assert.equal(result.ok,true);await until(()=>Boolean(finishAudio));
+ await until(()=>app.engine.utterances.filter(item=>item.kind==='debate').length>=2);
+ assert.equal(app.engine.utterances.some(item=>item.kind==='reaction'),false);
+ assert.equal(app.runner.stage.router.repliedAt.has('u1'),false);
+ finishAudio();await until(()=>app.engine.utterances.some(item=>item.kind==='reaction'));
+ assert.equal(app.engine.utterances.find(item=>item.kind==='reaction').audio,'/audio/reply.mp3');
+ assert.equal(audioCalls,1);await app.stop();
 });
 test('写好的临场回复不是已播记忆，已播历史会传给接话和重写，下一场重新开始',async t=>{
  const calls=[];const app=await runtime(t,{renderVoice:async item=>({url:'/audio/mock.mp3',durationMs:item.text===sample().turns[0].text?1:30000}),llm:{view:()=>({hasKey:true}),complete:async messages=>{calls.push(messages);return '行吧。';}}});
