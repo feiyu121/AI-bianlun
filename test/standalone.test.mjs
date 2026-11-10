@@ -122,6 +122,37 @@ test('投票期普通弹幕继续进入聊天，有效数字票只进票箱',asy
   const chat=await app.receive({type:'comment',name:'观众二',userId:'chat',text:'今天状态怎么样'});assert.equal(chat.heard,true);await Promise.all([...app.jobs]);assert.equal(calls.length,1);
 });
 
+test('场间点名使用对应角色和上一题已播记忆，配音完成后才发布',async t=>{
+ let prompt,finishAudio;
+ const app=await runtime(t,{llm:{view:()=>({hasKey:true}),complete:async messages=>{prompt=messages[0].content;return '刚才那句话我还没认输呢。';}},
+  renderVoice:async(_item,settings)=>new Promise(resolve=>{finishAudio=()=>resolve({url:'/audio/chat.mp3',durationMs:1000});assert.equal(settings.voiceName,app.engine.config.opponentVoice);})});
+ app.runner.attach({...sample(),sides:app.sides(null)});app.memory.remember({side:'A',text:'这次我可以少加一次班。',kind:'script'});
+ app.cycle.vote.open({candidates:app.snapshot().topics.slice(0,2)});app.cycle.phase='vote';
+ await app.receive({type:'comment',userId:'u1',name:'观众',text:'鲸鱼娘你还不服吗'});await until(()=>Boolean(finishAudio));
+ assert.equal(app.engine.utterances.length,0);assert.ok(prompt.includes('这次我可以少加一次班'));assert.ok(prompt.includes(sample().topic));
+ finishAudio();await Promise.all([...app.jobs]);
+ assert.equal(app.engine.utterances.at(-1).speaker,'B');assert.equal(app.engine.utterances.at(-1).kind,'chat');assert.equal(app.engine.utterances.at(-1).audio,'/audio/chat.mp3');
+});
+
+test('锁票进入开场后，迟到的场间生成不会抢麦或进入下一题',async t=>{
+ let finish;
+ const app=await runtime(t,{llm:{view:()=>({hasKey:true}),complete:async()=>new Promise(resolve=>{finish=resolve;})}});
+ app.cycle.vote.open({candidates:app.snapshot().topics.slice(0,2)});app.cycle.phase='vote';
+ await app.receive({type:'comment',userId:'u1',text:'刚才还没说完呢'});await until(()=>Boolean(finish));
+ app.cycle.setPhase('ready');finish('那我们继续说。');await Promise.all([...app.jobs]);
+ assert.equal(app.engine.utterances.length,0);assert.equal(app.chatPending,0);
+});
+
+test('进入下一场会取消尚未完成的场间配音，释放合成队列',async t=>{
+ let signal;
+ const app=await runtime(t,{llm:{view:()=>({hasKey:true}),complete:async()=> '那句话我还记着呢。'},
+  renderVoice:async(_item,_settings,options)=>{signal=options.signal;return new Promise((resolve,reject)=>signal.addEventListener('abort',()=>reject(signal.reason),{once:true}));}});
+ app.cycle.vote.open({candidates:app.snapshot().topics.slice(0,2)});app.cycle.phase='vote';
+ await app.receive({type:'comment',userId:'u1',text:'刚才那个条件怎么说'});await until(()=>Boolean(signal));
+ app.cycle.setPhase('ready');await Promise.allSettled([...app.jobs]);
+ assert.equal(signal.aborted,true);assert.equal(app.chatPending,0);assert.equal(app.jobs.size,0);assert.deepEqual(app.engine.utterances,[]);
+});
+
 test('阵营弹幕路由：重复去重、转投、暂停可加入，不进入接话模型或点名',async t=>{
   const calls=[];const app=await runtime(t,{llm:{view:()=>({hasKey:true}),complete:async m=>{calls.push(m);return '听见了。';}}});
   app.startSingle({script:sample()});await until(()=>app.runner.active);

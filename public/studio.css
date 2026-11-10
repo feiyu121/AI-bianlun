@@ -12,3 +12,5 @@
 .camp-panel{margin-bottom:20px}.camp-totals{display:flex;justify-content:space-between;gap:16px;font-size:12px}.camp-totals>span{display:flex;gap:9px;align-items:center;min-width:0}.camp-totals b{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:150px;font-weight:500}.camp-totals strong{white-space:nowrap;color:#356c60}.camp-totals>span:last-child strong{color:#806384}.camp-bar{height:7px;margin-top:10px;background:#baa1c4;border-radius:9px;overflow:hidden}.camp-bar i{display:block;width:50%;height:100%;background:#79a99a;transition:width .3s}.camp-rule{font-size:11px;line-height:1.8;color:#799096;margin:9px 0 0}
 
 .camp-gift-rule{font-size:11px;line-height:1.7;color:#799096;margin:5px 0 0;overflow-wrap:anywhere}
+
+.camp-totals>span{flex-wrap:wrap;row-gap:3px;max-width:48%}.camp-session{display:block;flex-basis:100%;font-size:12px;color:var(--muted);font-weight:400}

@@ -42,8 +42,8 @@ function render(data){
   $('generation-phase').textContent=phaseNames[generation.phase]||'等待任务';
   $('generation-detail').textContent=generation.topic?`${generation.topic}：${generation.message}`:'开始生成后，这里会逐步显示大纲、分幕写作、检查与配音预热。';
   $('generation-detail').parentElement.dataset.state=generation.state||'idle';
-  $('generation-progress').max=generation.totalActs||11;$('generation-progress').value=generation.completedActs||0;
-  $('generation-counts').textContent=`已处理 ${generation.completedActs||0} / ${generation.totalActs||11} 幕 · 累计 ${generation.turns||0} 句、${generation.chars||0} 字 · 约 ${Math.round((generation.estTotalSec||0)/60)} 分钟`;
+  $('generation-progress').max=generation.totalActs||5;$('generation-progress').value=generation.completedActs||0;
+  $('generation-counts').textContent=`已处理 ${generation.completedActs||0} / ${generation.totalActs||5} 段 · 累计 ${generation.turns||0} 句、${generation.chars||0} 字 · 约 ${Math.round((generation.estTotalSec||0)/60)} 分钟`;
   const elapsed=generation.startedAt?Math.max(0,Math.floor(((generation.finishedAt||Date.now())-generation.startedAt)/1000)):0;
   $('generation-time').textContent=generation.startedAt?`本份已用 ${Math.floor(elapsed/60)} 分 ${elapsed%60} 秒${generation.requestPending?` · 正在等待模型返回 ${Math.max(0,Math.floor((Date.now()-generation.requestAt)/1000))} 秒 · ${system.llm.active||0} 个调用中、${system.llm.queued||0} 个排队`:''}`:'';
   const generationLogs=data.logs.filter(row=>row.type==='generation').slice(0,120),logSignature=generationLogs.map(row=>row.id).join(',');
@@ -66,7 +66,8 @@ function render(data){
   $('audience-status').textContent=script.reaction.pool?`${script.reaction.pool} 条候选弹幕`:'等待弹幕';
   $('receipts').replaceChildren(...(script.receipts.length?script.receipts.slice(-4).reverse().map(row=>node('p',`${row.name} · ${row.kind==='bubble'?'已听见':row.name2+'：'+row.said}`)):[node('p','被听见的声音，会留在这里。','empty')]));
   $('vote-card').hidden=cycle.phase!=='vote';$('lock-vote').disabled=cycle.vote.closed;
-  $('vote-status').textContent=`发送 1～${cycle.vote.candidates.length||4} 投下一场；候选均为库存剧本。一人一票，可改票。${cycle.vote.closed?'已锁票，准备下一场。':`剩余约 ${Math.ceil((cycle.vote.remainingMs||0)/60000)} 分钟。`}`;
+  $('vote-status').textContent=`发 1～${cycle.vote.candidates.length||4} 选下一题，也可直接聊天。一人一票，可改票。${cycle.vote.closed?'已锁票，准备下一场。':`剩余 ${Math.ceil((cycle.vote.remainingMs||0)/1000)} 秒。`}`;
+  $('extend-chat').disabled=cycle.vote.closed;
   $('vote-options').replaceChildren(...(cycle.vote.candidates||[]).map(row=>{const div=node('div',undefined,'vote-option');div.append(node('b',row.index),node('span',row.topic),node('em',row.count+' 票'));return div;}));
   const signature=JSON.stringify(data.scripts);
   if(signature!==scriptSignature){scriptSignature=signature;
@@ -76,13 +77,13 @@ function render(data){
     if(data.scripts.some(row=>row.id===selected&&row.autoReady))$('play-script').value=selected;
     $('scripts').replaceChildren(...(data.scripts.length?data.scripts.map(row=>{
       const div=node('div',undefined,'script-row'),info=node('div');
-      info.append(node('b',row.topic),node('small',`${row.id.slice(-8)} · ${row.turns} 句 · 约 ${row.minutes} 分钟 · ${!row.ready?'未就绪':!row.longForm?'短样稿':!row.enabled?'已移出轮播':'已加入轮播'}`),node('small',`已播 ${row.playCount} 次 · 完整播完 ${row.completedCount} 次${row.lastPlayedAt?' · 最近 '+new Date(row.lastPlayedAt).toLocaleString('zh-CN'):' · 尚未播出'}`));
+      info.append(node('b',row.topic),node('small',`${row.id.slice(-8)} · ${row.turns} 句 · 约 ${row.minutes} 分钟 · ${!row.ready?'未就绪':!row.shortForm?(row.minutes>10?'旧长稿 · 可手动播放':'样稿 · 可手动播放'):!row.enabled?'已移出轮播':'短场 · 已加入轮播'}`),node('small',`已播 ${row.playCount} 次 · 完整播完 ${row.completedCount} 次${row.lastPlayedAt?' · 最近 '+new Date(row.lastPlayedAt).toLocaleString('zh-CN'):' · 尚未播出'}`));
       if(row.error)info.append(node('small',row.error,'script-error'));
       const actions=node('div',undefined,'script-actions');
       const action=(label,job,available=true)=>{const button=node('button',label);button.dataset.libraryAction=available?'ready':'unavailable';button.onclick=()=>run(button,job);actions.append(button);};
       action('播放',async()=>{await post('/api/script/start',{scriptId:row.id});document.querySelector('[data-tab=live]').click();toast('正在准备播放');},row.ready);
       action('预合成配音',async()=>{await post('/api/scripts/audio',{scriptId:row.id});toast('开始预合成配音，进度见顶部任务状态');},row.ready);
-      if(row.ready&&row.longForm)action(row.enabled?'移出轮播':'加入轮播',()=>post('/api/scripts/enabled',{scriptId:row.id,enabled:!row.enabled}));
+      if(row.ready&&row.shortForm)action(row.enabled?'移出轮播':'加入轮播',()=>post('/api/scripts/enabled',{scriptId:row.id,enabled:!row.enabled}));
       const link=node('a','导出 JSON');link.href='/api/scripts/export?id='+encodeURIComponent(row.id);link.download=row.id+'.json';actions.append(link);div.append(info,actions);return div;
     }):[node('p','还没有剧本。先生成，或导入已有 JSON。','empty')]));
   }
@@ -113,6 +114,7 @@ $('custom-topics').oninput=updateBatchSummary;$('topic').onchange=updateBatchSum
 $('batch-form').onsubmit=event=>{event.preventDefault();run(event.submitter,async()=>{await post('/api/scripts/generate-batch',{topicIds:[...$('topic').selectedOptions].map(option=>option.value),customTopics:customTopicLines(),count:Number($('batch-count').value)});toast('批量写稿已开始，每份完成后自动入库');});};
 bind('stop-production','/api/script/stop',{},'任务已停止，已入库剧本保留');
 bind('stop','/api/script/stop',{},'已停止全部场次和生成任务');bind('skip','/api/script/skip',{},'已跳到下一幕');bind('lock-vote','/api/vote/lock',{},'已锁票，准备下一场');
+bind('extend-chat','/api/vote/extend',{},'场间聊天已延长 15 秒，已有选题票保留');
 $('pause').onclick=event=>run(event.currentTarget,()=>post(snapshot.script.paused?'/api/script/resume':'/api/script/pause'));
 $('demo').onclick=event=>run(event.currentTarget,async()=>{const script=await fetch('/demo.json').then(r=>r.json());await post('/api/script/start',{script});toast('简短样稿已启动，请在 OBS 场景开启声音');});
 $('import-script').onchange=async event=>{const file=event.target.files[0];if(!file)return;try{if(file.size>1024*1024)throw new Error('剧本不能超过 1 MB');const script=JSON.parse(await file.text());await post('/api/script/import',{script});toast('剧本已导入');}catch(error){toast(error.message);}event.target.value='';};

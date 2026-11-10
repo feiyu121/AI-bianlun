@@ -13,7 +13,7 @@ const root=fileURLToPath(new URL('..',import.meta.url)),cleanup=new Map();
 async function temporary(t){const dir=await mkdtemp(path.join(os.tmpdir(),'ai-library-test-'));t.after(async()=>{await cleanup.get(dir)?.();cleanup.delete(dir);assert.ok(path.resolve(dir).startsWith(path.resolve(os.tmpdir())+path.sep+'ai-library-test-'));await rm(dir,{recursive:true,force:true});});return dir;}
 const text='我们先把这件事实际发生时的条件讲清楚，再看对方提出的办法是否真的有用。';
 function full(id='s1',topic='会议该怎么开'){
-  return {id,topic,topicId:'meeting',meta:{ready:true},turns:Array.from({length:44},(_,i)=>({act:Math.floor(i/4)+1,side:i%2?'B':'A',text:text.repeat(6),reaction:true}))};
+  return {id,topic,topicId:'meeting',meta:{ready:true},turns:Array.from({length:25},(_,i)=>({act:Math.floor(i/5)+1,side:i%2?'B':'A',text:text.repeat(2),reaction:true}))};
 }
 function short(id='short'){return {id,topic:'先把话聊清楚',meta:{ready:true},turns:[{act:1,side:'A',text:'那我们把条件先说清楚。'},{act:2,side:'B',text:'行，听你解释。'}]};}
 async function until(check){const deadline=Date.now()+3000;while(!check()){assert.ok(Date.now()<deadline,'等待超时');await new Promise(resolve=>setTimeout(resolve,5));}}
@@ -24,16 +24,25 @@ async function runtime(t,options={}){
 }
 const row=(id,topic=id,other={})=>({id,topic,autoReady:true,playCount:0,lastPlayedAt:'',...other});
 
+test('旧长稿保留可手动播，默认轮播排除，原文和导出不截断',async t=>{
+ const app=await runtime(t),long=full('old-long');long.turns=long.turns.map(row=>({...row,text:row.text.repeat(3)}));
+ await app.saveScript(long);
+ assert.equal(app.scripts[0].ready,true);assert.equal(app.scripts[0].autoReady,false);
+ assert.deepEqual((await app.loadScript(long.id)).turns,long.turns);
+ assert.equal((await app.libraryEntry(long.id)).ready,true);
+ await assert.rejects(app.libraryEntry(long.id,{automatic:true}),/短场轮播/);
+});
+
 test('运行时实时发布模型等待、分幕统计、检查入库和配音进度，完成后结束计时',async t=>{
   let release;const app=await runtime(t,{llm:{view:()=>({hasKey:true,active:1,queued:0}),complete:async()=>new Promise(resolve=>{release=resolve;})}});
   t.mock.method(ScriptWriter.prototype,'write',async function(){
-    this.report('正在写第 1/11 幕',{phase:'act',act:1});await this.complete([]);
-    this.report('已处理 11/11 幕',{phase:'act',completedActs:11,totalActs:11,turns:44,chars:9000,estTotalSec:1800});return {...full(),topic:this.topic,sides:this.sides,meta:{}};
+    this.report('正在写第 1/5 幕',{phase:'act',act:1});await this.complete([]);
+    this.report('已处理 11/5 幕',{phase:'act',completedActs:5,totalActs:5,turns:25,chars:2000,estTotalSec:420});return {...full(),topic:this.topic,sides:this.sides,meta:{}};
   });
   app.generateBatch({customTopics:['周末应该怎么过']});await until(()=>app.snapshot().generation.requestPending);
-  const waiting=app.snapshot().generation;assert.equal(waiting.state,'running');assert.equal(waiting.phase,'act');assert.ok(waiting.requestAt>0);assert.ok(app.engine.logs.some(row=>row.type==='generation'&&row.detail.includes('第 1/11 幕')));
+  const waiting=app.snapshot().generation;assert.equal(waiting.state,'running');assert.equal(waiting.phase,'act');assert.ok(waiting.requestAt>0);assert.ok(app.engine.logs.some(row=>row.type==='generation'&&row.detail.includes('第 1/5 幕')));
   release('模型已返回');await app.task;
-  const done=app.snapshot().generation;assert.equal(done.state,'completed');assert.equal(done.phase,'ready');assert.equal(done.requestPending,false);assert.equal(done.completedActs,11);assert.equal(done.turns,44);assert.equal(done.audioDone,6);assert.ok(done.finishedAt>=done.startedAt);
+  const done=app.snapshot().generation;assert.equal(done.state,'completed');assert.equal(done.phase,'ready');assert.equal(done.requestPending,false);assert.equal(done.completedActs,5);assert.equal(done.turns,25);assert.equal(done.audioDone,6);assert.ok(done.finishedAt>=done.startedAt);
   assert.equal(waiting.requestPending,true,'之前拿到的快照不会随完成状态改变');
   for(const phrase of ['正在检查剧本','正在保存','起播配音已预热 6/6','剧本已就绪'])assert.ok(app.engine.logs.some(row=>row.detail.includes(phrase)),phrase);
 });
@@ -124,11 +133,11 @@ test('空库开播直接报错，单场与循环都不会偷偷写稿',async t=>
   app.startCycle();await app.task;assert.match(app.operation.message,/没有可轮播/);assert.equal(writes,0);
 });
 
-test('轮播只收完整可用的长场；移出后保留原稿，短稿只支持单场',async t=>{
+test('轮播只收完整可用的短场；移出后保留原稿，短稿只支持单场',async t=>{
   const app=await runtime(t);await app.saveScript(full());await app.saveScript(short());await app.saveScript({...full('unready'),meta:{ready:false}});
   assert.equal(app.snapshot().library.available,1);const before=await app.loadScript('s1');
   await app.setScriptEnabled('s1',false);assert.equal(app.snapshot().library.available,0);assert.deepEqual(await app.loadScript('s1'),before);
-  const out=await app.libraryEntry('short');assert.equal(out.ready,true);await assert.rejects(app.libraryEntry('short',{automatic:true}),/长场轮播/);
+  const out=await app.libraryEntry('short');assert.equal(out.ready,true);await assert.rejects(app.libraryEntry('short',{automatic:true}),/短场轮播/);
   await assert.rejects(app.libraryEntry('unready'),/未就绪/);
 });
 
@@ -204,7 +213,7 @@ test('HTTP 支持入库、开关、预合成，导出原稿不混入播出统计
   state=await fetch(base+'/api/state').then(r=>r.json());assert.equal(state.library.available,0);
   assert.equal((await post('/api/scripts/generate-batch',{topicIds:[],count:1})).status,400);
   assert.equal((await post('/api/scripts/audio',{scriptId:imported.scriptId})).status,200);await app.runtime.task;
-  const exported=await fetch(base+'/api/scripts/export?id='+imported.scriptId).then(r=>r.json());assert.equal(exported.playCount,undefined);assert.equal(exported.turns.length,44);
+  const exported=await fetch(base+'/api/scripts/export?id='+imported.scriptId).then(r=>r.json());assert.equal(exported.playCount,undefined);assert.equal(exported.turns.length,25);
   const html=await readFile(path.join(root,'public/index.html'),'utf8');assert.match(html,/id="tab-library"/);assert.ok(!html.includes('生成并播放单场'));
 });
 
@@ -212,7 +221,7 @@ test('HTTP 防护开关重查库存，并同步控制语音检查与音频授权
   const dataDir=await temporary(t);const app=await createApplication({root,dataDir,platformEnabled:false,edgeSpeech:async()=>({ok:true}),renderVoice:async()=>({url:'/audio/mock.mp3',durationMs:1})});
   await new Promise(resolve=>app.server.listen(0,'127.0.0.1',resolve));cleanup.set(dataDir,()=>app.close());
   const base='http://127.0.0.1:'+app.server.address().port,post=(url,body)=>fetch(base+url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
-  await post('/api/safety',{blockedTerms:['自定测试词']});const script=full();script.turns[39].text+='自定测试词';await app.runtime.saveScript(script);
+  await post('/api/safety',{blockedTerms:['自定测试词']});const script=full();script.turns[20].text+='自定测试词';await app.runtime.saveScript(script);
   assert.equal(app.runtime.snapshot().library.available,0);
   const off=await post('/api/safety',{enabled:false}).then(r=>r.json());assert.equal(off.safety.enabled,false);assert.equal(app.runtime.snapshot().library.available,1);
   const item=app.runtime.engine.say('自定测试词');assert.equal(item.text,'自定测试词');

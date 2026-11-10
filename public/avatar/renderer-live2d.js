@@ -3,23 +3,12 @@
 // 写参数的时机统一在 model.update() 之后、render 之前——这是唯一能稳赢过
 // 动作曲线的时点。
 (() => {
+  const profiles=import('/avatar-profiles.js');
   const R = (window.AvatarRenderers = window.AvatarRenderers || {});
   const clamp = (v, a = 0, b = 1) => Math.max(a, Math.min(b, v));
   const own = (o, k) => Object.prototype.hasOwnProperty.call(o, k);
 
 
-  // 情绪 → 表情/动作。动作组只有 Idle(idle/dance/jump)、Blink、Nod、Shake。
-  const EMOTIONS = {
-    neutral:   { expression: null,        motion: null },
-    happy:     { expression: '微笑',      motion: null },
-    excited:   { expression: '微笑',      motion: ['Idle', 2] },   // jump
-    surprised: { expression: '惊讶',      motion: null },
-    sad:       { expression: '悲伤',      motion: null },
-    angry:     { expression: '生气',      motion: ['Shake', 0] },
-    dizzy:     { expression: '悲伤',      motion: ['Shake', 0] },
-    shy:       { expression: '微笑',      motion: null },
-    smug:      { expression: '微笑',      motion: null },
-  };
   const POSE_PARAMS = { yaw: 'ParamAngleX', pitch: 'ParamAngleY', roll: 'ParamAngleZ', gazeX: 'ParamEyeBallX', gazeY: 'ParamEyeBallY' };
 
   const script = (src) => new Promise((resolve, reject) => {
@@ -50,7 +39,9 @@
     const base = MODEL.slice(0, MODEL.lastIndexOf('/') + 1);
     // 表情手工套层：不走 expressionManager，Blend 语义自己算。
     const expressions = new Map(await Promise.all((manifest.FileReferences.Expressions || []).map(async (entry) => [entry.Name, await fetchJson(base + entry.File)])));
-    const state = { emotion: '', expression: [], motion: null, poseOverride: null, pose: { yaw: 0, pitch: 0, roll: 0, gazeX: 0, gazeY: 0 }, mouthGain: config.mouthGain ?? 1, modelTime: 0, last: null, idle: true };
+    const {AVATAR_PROFILES,EXPRESSION_ALIASES}=await profiles;
+    const profile=AVATAR_PROFILES[config.performanceProfile]||AVATAR_PROFILES[expressions.has('开心兴奋')?'whale':'roubao'];
+    const state = { emotion: '', expression: [], expressionRestore:new Map(), motion: null, poseOverride: null, pose: { yaw: 0, pitch: 0, roll: 0, gazeX: 0, gazeY: 0 }, mouthGain: config.mouthGain ?? 1, modelTime: 0, last: null, idle: true };
 
     const app = new v.Application();
     const width = Math.max(320, (display.charHeight || 335) * 1.9), height = Math.max(260, (display.charHeight || 335) * 1.75);
@@ -87,12 +78,12 @@
     const setValue = (id, value) => { const i = ids.get(id); if (i !== undefined) params.values[i] = Math.max(params.minimumValues[i], Math.min(params.maximumValues[i], value)); };
 
     const setEmotion = (emotion) => {
-      if (own(EMOTIONS, emotion) === false || emotion === state.emotion) return;
+      emotion=EXPRESSION_ALIASES[emotion]||emotion;
+      if (!own(profile,emotion)||emotion === state.emotion) return;
       state.emotion = emotion;
-      const spec = EMOTIONS[emotion] || EMOTIONS.neutral;
-      state.expression = spec.expression ? (expressions.get(spec.expression)?.Parameters || []) : [];
+      state.expressionName=profile[emotion];
+      state.expression = state.expressionName ? (expressions.get(state.expressionName)?.Parameters || []) : [];
       if (state.motion) state.motion = null;
-      if (spec.motion && manifest.FileReferences.Motions?.[spec.motion[0]]?.[spec.motion[1]] && !state.poseOverride) { state.motion = spec.motion; state.motionAt = state.modelTime; state.motionDur = 2.4; model.motion(spec.motion[0], spec.motion[1], v.MotionPriority.FORCE, { loop: false }).catch(() => {}); }
     };
     let disposed = false;
     return {
@@ -110,6 +101,7 @@
         } else if (!state.idle && !state.motion) { state.idle = true; idle(true); }
       },
       getPose() { return { ...state.pose }; },
+      getPerformance() { return {expression:state.emotion,asset:state.expressionName||null,pose:{...state.pose},parameters:state.expression.length}; },
       // 调试出口：headless 验证（tools/debug-page.mjs + 临时测试页）直接采样参数值用。
       __debugParams: params,
       frame(t, level) {
@@ -118,17 +110,21 @@
         if (state.last !== null && rawDt < 1 / 60 - 0.001) return;             // 帧率限制（OBS 捕获沿用上一帧）
         state.last = t;
         const dt = clamp(rawDt, 0.001, 1 / 15);
+        // Remove the previous overlay before evaluating the next frame; changing to neutral must clear it.
+        for(const [index,value]of state.expressionRestore)params.values[index]=value;
+        state.expressionRestore.clear();
         if (rawDt > 0.0005) { state.modelTime += dt; model.update(dt * 1000); }  // 暂停时 t 不再增长 → 冻结动作，只留最后一帧
         // 一次性动作播完 → 回 idle（打工姿势覆盖中除外）
         if (!state.poseOverride && state.motion && motionDone()) { state.motion = null; state.idle = true; idle(true); }
         // --- 以下写入都在动作求值之后，稳赢曲线 ---
         // 眨眼（模型 idle 曲线里有眼开合，所以放在 update 后写才能生效）
-        const blink = state.modelTime % 4.7;
+        const blink = (state.modelTime+(profile===AVATAR_PROFILES.whale?1.9:0)) % 4.7;
         const eyeValue = blink < 0.12 ? 0.1 : 1;
         setValue('ParamEyeLOpen', eyeValue); setValue('ParamEyeROpen', eyeValue);
         // 表情层（Overwrite/Add/Multiply，作用在眨眼后的当前值上）
         for (const row of state.expression) {
           const i = ids.get(row.Id); if (i === undefined) continue;
+          if(!state.expressionRestore.has(i))state.expressionRestore.set(i,params.values[i]);
           const value = row.Blend === 'Multiply' ? params.values[i] * row.Value : row.Blend === 'Add' ? params.values[i] + row.Value : row.Value;
           params.values[i] = Math.max(params.minimumValues[i], Math.min(params.maximumValues[i], value));
         }

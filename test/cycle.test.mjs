@@ -199,8 +199,10 @@ test('播放抛错不算整晚结束：这一场当提前收尾，继续走', as
   assert.equal(cycle.stats.aborted, 0);
 });
 
-test('默认排期与文档一致：结果卡 90 秒、预热 +2 分钟、并发 2', () => {
-  assert.equal(CYCLE_DEFAULTS.resultMs, 90000);
+test('默认短场排期：结果卡3秒、投票20～30秒、开场2秒', () => {
+  assert.equal(CYCLE_DEFAULTS.resultMs, 3000);
+  assert.equal(CYCLE_DEFAULTS.voteMinMs,20000);assert.equal(CYCLE_DEFAULTS.voteMaxMs,30000);
+  assert.equal(CYCLE_DEFAULTS.readyMs,2000);assert.equal(CYCLE_DEFAULTS.tieExtraMs,0);
   assert.equal(CYCLE_DEFAULTS.prewarmDelayMs, 120000);
   assert.equal(CYCLE_DEFAULTS.concurrency, 2);
   assert.equal(CYCLE_DEFAULTS.candidates, 4);

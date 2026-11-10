@@ -20,8 +20,8 @@ function line(index){
  let seed=(index+1)>>>0;
  const rand=()=>{seed=(seed*1664525+1013904223)>>>0;return seed/4294967296;};
  let text=`你刚才那句我记下了，第${index}句；`;
- while(text.length<150)text+=BASE[Math.floor(rand()*BASE.length)];
- return text.slice(0,150);
+ while(text.length<90)text+=BASE[Math.floor(rand()*BASE.length)];
+ return text.slice(0,90);
 }
 
 // 假模型：按「本幕/句数/先说」把这一幕写出来，并记录每次请求，便于断言上下文。
@@ -56,19 +56,19 @@ function make(options={}){
  return {writer,box};
 }
 
-test('写稿进度依次报告大纲、分幕完成数、扩写与合并，累计台词与结果一致',async()=>{
+test('写稿进度依次报告大纲、分幕完成数与合并，累计台词与结果一致',async()=>{
  const events=[],logs=[];
  const {writer}=make({writer:{onProgress:event=>events.push(event),log:message=>logs.push(message)}});
  const script=await writer.write();
- assert.equal(events[0].phase,'outline');assert.ok(events.some(e=>e.phase==='refine'));assert.equal(events.at(-1).phase,'assemble');
- assert.deepEqual(events.filter(e=>e.completedActs!==undefined).map(e=>e.completedActs),Array.from({length:11},(_,i)=>i+1));
+ assert.equal(events[0].phase,'outline');assert.equal(events.some(e=>e.phase==='refine'),false);assert.equal(events.at(-1).phase,'assemble');
+ assert.deepEqual(events.filter(e=>e.completedActs!==undefined).map(e=>e.completedActs),Array.from({length:ACTS.length},(_,i)=>i+1));
  assert.equal(events.at(-1).turns,script.turns.length);assert.equal(events.at(-1).chars,script.turns.reduce((sum,t)=>sum+t.text.length,0));
- assert.equal(events.at(-1).estTotalSec,script.meta.estTotalSec);assert.ok(logs.some(line=>line.includes('第 11/11 幕')));
+ assert.equal(events.at(-1).estTotalSec,script.meta.estTotalSec);assert.ok(logs.some(line=>line.includes('第 5/5 幕')));
 });
 
 test('进度能显示同一幕重试，缺少有效句不会伪装成一次成功',async()=>{
- const events=[],logs=[];const {writer}=make({short:label=>label===ACTS[0].label,writer:{onProgress:event=>events.push(event),log:message=>logs.push(message)}});
- await writer.write();assert.ok(events.some(e=>e.phase==='act'&&e.act===1&&e.attempt===2));assert.ok(logs.some(line=>line.includes('准备重写')));
+ const events=[],logs=[];const {writer}=make({fail:(()=>{let once=false;return data=>Boolean(data.本幕)&&!once&&(once=true);})(),writer:{onProgress:event=>events.push(event),log:message=>logs.push(message)}});
+ await writer.write();assert.ok(events.some(e=>e.phase==='act'&&e.act===1&&e.attempt===2));assert.ok(logs.some(line=>line.includes('准备重试')));
 });
 
 test('取消写稿立即退出，不重试模型或生成后续分幕和回退大纲',async()=>{
@@ -77,25 +77,25 @@ test('取消写稿立即退出，不重试模型或生成后续分幕和回退�
  await assert.rejects(writer.write(),/手动停止/);assert.equal(calls,1);assert.ok(!logs.some(line=>line.includes('内置幕骨架')));
 });
 
-test('整场结构：11 幕 59 句，反应位 51 个',async()=>{
+test('整场结构：五段参考24轮，允许自然长短变化',async()=>{
  const {writer}=make();
  const script=await writer.write({});
- assert.equal(script.turns.length,59);
- assert.equal(script.acts.length,11);
- assert.equal(script.turns.at(-1).act,11);
+ assert.equal(script.turns.length,24);
+ assert.equal(script.acts.length,5);
+ assert.equal(script.turns.at(-1).act,5);
  // 冷开场 2 句 + 两个结辩 6 句不设反应位
- assert.equal(script.turns.filter(turn=>turn.reaction).length,51);
+ assert.equal(script.turns.filter(turn=>turn.reaction).length,22);
  assert.equal(script.turns.slice(0,2).every(turn=>!turn.reaction),true);
  // 幕号必须是连续的升序，播放器按幕换幕清池
  const acts=[...new Set(script.turns.map(turn=>turn.act))];
- assert.deepEqual(acts,[1,2,3,4,5,6,7,8,9,10,11]);
+ assert.deepEqual(acts,[1,2,3,4,5]);
 });
 
-test('时长按字数估：140 字 ≈ 29 秒，全稿落在 28~31 分钟',async()=>{
+test('时长按字数估：140 字 ≈ 29 秒，参考稿约七分钟',async()=>{
  const {writer}=make();
  const script=await writer.write({});
  assert.equal(estSeconds('一'.repeat(140)),29);
- assert.ok(script.meta.estTotalSec>28*60&&script.meta.estTotalSec<32*60,`实测 ${script.meta.estTotalSec}`);
+ assert.ok(script.meta.estTotalSec>=6*60&&script.meta.estTotalSec<=8*60,`实测 ${script.meta.estTotalSec}`);
  assert.ok(Math.abs(script.meta.deviation)<0.1);
 });
 
@@ -121,10 +121,10 @@ test('不可播内容丢弃，旁白剥除，局部认同保留',async()=>{
 });
 
 test('跨幕消重：同一段话第二次出现就丢',async()=>{
- const {writer}=make({dup:['展开 · 1','展开 · 2']});
+ const {writer}=make({dup:['交锋','换个角度']});
  const script=await writer.write({});
  assert.ok(script.meta.duplicates>=2,`重复计数 ${script.meta.duplicates}`);
- assert.ok(script.turns.length<59);
+ assert.ok(script.turns.length<24);
  // 留下的每一句都必须和别的句子不像
  for(let i=0;i<script.turns.length;i++)for(let j=0;j<i;j++){
   assert.ok(similarity(script.turns[i].text,script.turns[j].text)<0.35,'有漏网的重复句');
@@ -135,38 +135,38 @@ test('大纲整段失败就用内置骨架，稿子照样写得出来',async()=>
  const {writer,box}=make({outline:'这不是 JSON'});
  const script=await writer.write({});
  assert.equal(script.meta.fallback,true);
- assert.equal(script.turns.length,59);
+ assert.equal(script.turns.length,24);
  assert.ok(box.calls.some(call=>call.system.includes('大纲')));
 });
 
-test('一幕写不够句数就重写一次，第二次提示里点名上一版不合格',async()=>{
- const {writer,box}=make({short:label=>label==='接着聊 · 1'});
+test('一幕自然写短也保留，不为凑够参考轮数重写',async()=>{
+ const {writer,box}=make({short:label=>label==='接着聊'});
  const script=await writer.write({});
- assert.equal(script.meta.retried,1);
+ assert.equal(script.meta.retried,0);
  const retry=box.calls.filter(call=>call.system.includes('上一次写的不合格'));
- assert.equal(retry.length,1);
- assert.ok(retry[0].system.includes('句数不够'));
+ assert.equal(retry.length,0);
+
  // 重写之后这一幕凑够了 3 句
- assert.equal(script.turns.filter(turn=>turn.act===2).length,3);
+ assert.equal(script.turns.filter(turn=>turn.act===2).length,1);
 });
 
 test('块与块之间传真实原话：第二块第一幕能看到上一块最后两句',async()=>{
  // 这里显式写死 3：块边界决定了「谁拿得到原话」，跟着默认并发改动会让这条测试失去意义。
  const {writer,box}=make({writer:{concurrency:3}});
  await writer.write({});
- const clash1=box.calls.find(call=>call.data.本幕==='展开 · 1');
+ const clash1=box.calls.find(call=>call.data.本幕==='换个角度');
  assert.ok(clash1.system.includes('上一幕最后几句'),'块首那一幕必须带原话');
  // 同一块里的第二幕拿不到（并发时它还没写完），这是已知的取舍，不是 bug
- const sum1=box.calls.find(call=>call.data.本幕==='幕间 · 1');
+ const sum1=box.calls.find(call=>call.data.本幕==='尾声');
  assert.ok(!sum1.system.includes('上一幕最后几句'));
 });
 
 test('单幕失败不拖垮整场：那一幕空着，别的照写',async()=>{
- const {writer}=make({fail:data=>data.本幕==='展开 · 3'});
+ const {writer}=make({fail:data=>data.本幕==='交锋'});
  const script=await writer.write({});
- assert.equal(script.acts.find(act=>act.id==='clash3'),undefined);
- assert.ok(script.turns.length>40);
- assert.equal(script.turns.some(turn=>turn.act===7),false,'失败那一幕一句都不该有');
+ assert.equal(script.acts.find(act=>act.id==='clash1'),undefined);
+ assert.ok(script.turns.length>10);
+ assert.equal(script.turns.some(turn=>turn.act===3),false,'失败那一幕一句都不该有');
 });
 
 test('默认不分配谁先开口，B 起话也保留',async()=>{
@@ -174,7 +174,7 @@ test('默认不分配谁先开口，B 起话也保留',async()=>{
   complete:async messages=>{
    const data=JSON.parse(messages[1].content);
    if(!data.本幕)return '{}';
-   if(data.本幕!=='接着聊 · 1')return JSON.stringify([{side:'A',text:line(1)},{side:'B',text:line(2)},{side:'A',text:line(3)}]);
+   if(data.本幕!=='接着聊')return JSON.stringify([{side:'A',text:line(1)},{side:'B',text:line(2)},{side:'A',text:line(3)}]);
    // 接着聊 · 1 应该 A 先说，这里故意先说 B
    return JSON.stringify([{side:'B',text:line(9)},{side:'A',text:line(10)},{side:'B',text:line(11)}]);
   },

@@ -55,23 +55,23 @@ try{
   await page.locator('#topic').selectOption([]);await page.locator('#preset-topics summary').click();await page.locator('#batch-count').fill('1');
   // Exercise the waiting view with a snapshot fixture; no real model request.
   const previousGeneration=app.runtime.generation;
-  app.runtime.generation={state:'running',phase:'act',topic:'情侣之间该不该查看手机',message:'正在写第 3/11 幕「接着聊 · 2」',startedAt:Date.now()-90000,requestAt:Date.now()-25000,requestPending:true,completedActs:2,totalActs:11,turns:8,chars:1360,estTotalSec:270};
-  app.runtime.log('正在写第 3/11 幕「接着聊 · 2」','generation');
+  app.runtime.generation={state:'running',phase:'act',topic:'情侣之间该不该查看手机',message:'正在写第 3/5 幕「交锋」',startedAt:Date.now()-90000,requestAt:Date.now()-25000,requestPending:true,completedActs:2,totalActs:5,turns:8,chars:1360,estTotalSec:270};
+  app.runtime.log('正在写第 3/5 幕「交锋」','generation');
   await page.waitForFunction(()=>document.getElementById('generation-progress').value===2);
-  assert.match(await page.locator('#generation-counts').innerText(),/已处理 2 \/ 11 幕.*8 句.*1360 字/);
+  assert.match(await page.locator('#generation-counts').innerText(),/已处理 2 \/ 5 段.*8 句.*1360 字/);
   assert.match(await page.locator('#generation-time').innerText(),/正在等待模型返回/);
-  assert.match(await page.locator('#generation-logs').innerText(),/第 3\/11 幕/);
+  assert.match(await page.locator('#generation-logs').innerText(),/第 3\/5 幕/);
   await page.screenshot({path:path.join(output,'generation-progress.png'),fullPage:true});
   app.runtime.generation=previousGeneration;app.runtime.emit();
-  const dialogue='我们先把这件事实际发生时的条件讲清楚，再看对方提出的办法是否真的有用。'.repeat(6);
+  const dialogue='我们先把这件事实际发生时的条件讲清楚，再看对方提出的办法是否真的有用。'.repeat(2);
   const prepare=app.runtime.prepare;
-  app.runtime.prepare=async topic=>{const script={id:'qa-'+topic.id,topic:topic.topic,topicId:topic.id,sides:app.runtime.sides(topic),meta:{ready:true},turns:Array.from({length:44},(_,i)=>({act:Math.floor(i/4)+1,side:i%2?'B':'A',text:dialogue}))};await app.runtime.saveScript(script);return {script,ready:true};};
+  app.runtime.prepare=async topic=>{const script={id:'qa-'+topic.id,topic:topic.topic,topicId:topic.id,sides:app.runtime.sides(topic),meta:{ready:true},turns:Array.from({length:25},(_,i)=>({act:Math.floor(i/5)+1,side:i%2?'B':'A',text:dialogue}))};await app.runtime.saveScript(script);return {script,ready:true};};
   try{
     await page.locator('#generate').click();
     await page.waitForFunction(()=>document.getElementById('production-status').textContent.includes('2 份就绪'));
     assert.equal(app.runtime.production.succeeded,2);assert.ok(app.runtime.scripts.every(row=>row.topicId.startsWith('custom-')));
   }finally{app.runtime.prepare=prepare;}
-  await app.runtime.saveScript({id:'qa-library',topic:'会议应该怎样安排',topicId:'meeting',meta:{ready:true},turns:Array.from({length:44},(_,i)=>({act:Math.floor(i/4)+1,side:i%2?'B':'A',text:dialogue}))});
+  await app.runtime.saveScript({id:'qa-library',topic:'会议应该怎样安排',topicId:'meeting',meta:{ready:true},turns:Array.from({length:25},(_,i)=>({act:Math.floor(i/5)+1,side:i%2?'B':'A',text:dialogue}))});
   const prepared=page.locator('.script-row').filter({hasText:'会议应该怎样安排'});
   await prepared.getByRole('button',{name:'移出轮播',exact:true}).click();
   await prepared.getByRole('button',{name:'加入轮播',exact:true}).waitFor();assert.equal(app.runtime.snapshot().library.available,2);
@@ -82,7 +82,7 @@ try{
   const sample={topic:'接住现场的一句话',turns:[{act:1,side:'A',text:'那我们先把条件讲清楚。'},{act:2,side:'B',text:'行，你先说说看。'}]};
   await page.locator('#import-script').setInputFiles({name:'qa-short.json',mimeType:'application/json',buffer:Buffer.from(JSON.stringify(sample))});
   const imported=page.locator('.script-row').filter({hasText:'接住现场的一句话'});await imported.waitFor();
-  assert.match(await imported.innerText(),/短样稿/);
+  assert.match(await imported.innerText(),/样稿/);
   await page.screenshot({path:path.join(output,'library.png'),fullPage:true});
   await imported.getByRole('button',{name:'播放',exact:true}).click();
   await page.waitForFunction(()=>document.getElementById('camp-rule').textContent.includes('一人一票'));
@@ -118,14 +118,25 @@ try{
   await page.locator('#stop').click();
   await page.waitForFunction(()=>document.getElementById('operation').textContent.includes('已停止'));
   assert.equal(app.runtime.runner.active,false);
-  await page.waitForFunction(()=>document.getElementById('camp-rule').textContent.includes('本场 8 票'));
+  await page.waitForFunction(()=>document.getElementById('camp-rule').textContent.includes('本题 8 票'));
   app.runtime.cycle.phase='vote';app.runtime.cycle.vote.open({candidates:app.runtime.snapshot().topics.slice(0,4)});app.runtime.emit();
   await page.waitForFunction(()=>document.getElementById('camp-rule').textContent.includes('场间发数字选下一题'));
   await page.locator('#test-comment').fill('1');await page.locator('#test-event button').click();
   assert.equal(app.runtime.cycle.vote.total(),1);assert.equal(app.runtime.camps.view().total,2);
+  const closesAt=app.runtime.cycle.vote.closesAt;
+  await page.locator('#extend-chat').click();
+  await page.waitForFunction(()=>document.getElementById('toast').textContent.includes('已延长 15 秒'));
+  assert.equal(app.runtime.cycle.vote.closesAt,closesAt+15000);assert.equal(app.runtime.cycle.vote.total(),1);
+  assert.deepEqual(await campScene.locator('.camp-session').allTextContents(),['本次直播 4 票','本次直播 4 票']);
+  const chat=app.runtime.engine.say('刚才你说摸鱼靠本事，我可记着呢。观众都听见了，下一场你别偷偷改口。','happy');
+  Object.assign(chat,{kind:'chat',speaker:'B',name:'鲸鱼娘'});
+  app.runtime.playback={id:chat.id,text:chat.text,speaker:'B',until:Date.now()+30000};app.runtime.emit();
+  await campScene.locator('#intermission-chat').waitFor({state:'visible'});
+  assert.equal(await campScene.locator('#intermission-chat-name').innerText(),'鲸鱼娘');
   await campScene.waitForFunction(()=>document.getElementById('scene-vote-footer').textContent.includes('肉包 4 票 / 鲸鱼娘 4 票'));
-  const voteSpace=await campScene.locator('.intermission').evaluate(el=>({bottom:el.getBoundingClientRect().bottom,stageBottom:document.getElementById('stage').getBoundingClientRect().bottom,contentBottom:document.getElementById('scene-vote-footer').getBoundingClientRect().bottom}));
+  const voteSpace=await campScene.locator('.intermission').evaluate(el=>({bottom:el.getBoundingClientRect().bottom,stageBottom:document.getElementById('stage').getBoundingClientRect().bottom,contentBottom:document.getElementById('intermission-chat').getBoundingClientRect().bottom,full:el.scrollHeight,visible:el.clientHeight}));
   assert.ok(voteSpace.bottom<=voteSpace.stageBottom-120&&voteSpace.contentBottom<=voteSpace.bottom,'场间投票也应保留底部空间且完整显示');
+  assert.ok(voteSpace.full<=voteSpace.visible+1,'选题与场间接话同时完整呈现，不依赖滚动');
   await campScene.screenshot({path:path.join(output,'scene-camps-intermission.png')});await campScene.close();
   app.runtime.cycle.phase='idle';app.runtime.emit();
   await page.getByRole('button',{name:'模型与语音'}).click();
@@ -193,6 +204,40 @@ try{
     }
   }
   app.runtime.engine.state.scriptLine=previousLine;app.runtime.emit();
+  // Real model rendering: distinct asset names, speaker/listener choreography and neutral reset.
+  await page.setViewportSize({width:540,height:960});
+  app.runtime.playback.until=0;app.runtime.runner.active=true;app.runtime.runner.paused=false;
+  for(const fixture of [
+    {side:'B',text:'行，你最勤快。上次谁躺着指挥我找遥控器？',expression:'teasing',listenerReaction:'caught',a:'embarrassed',b:'teasing',asset:'调皮',shot:'scene-performance-teasing.png'},
+    {side:'A',text:'等一下，这件事让我想想。你说的那个条件确实得算进去。',expression:'thinking',listenerReaction:'skeptical',a:'thinking',b:'thinking',asset:'',shot:'scene-performance-thinking.png'},
+    {side:'B',text:'这次我认真说。刚才那句是玩笑，你别真往心里去。',expression:'serious',listenerReaction:'softened',a:'smile',b:'serious',asset:'',shot:'scene-performance-serious.png'}
+  ]){
+    const performance={...fixture,delivery:'自然接话',pauseBeforeMs:0};
+    app.runtime.runner.reveal({side:fixture.side,text:fixture.text,performance,durationMs:10000});
+    app.runtime.engine.state.performanceCue.at-=1600;app.runtime.emit();
+    await page.waitForFunction(({a,b})=>document.getElementById('avatar-a').dataset.expression===a&&document.getElementById('avatar-b').dataset.expression===b,fixture);
+    assert.equal(await page.locator('#avatar-b').getAttribute('data-expression-asset'),fixture.asset);
+    assert.equal(await page.locator('#side-'+fixture.side.toLowerCase()).getAttribute('data-speaking'),'true');
+    assert.equal(await page.locator('#side-'+(fixture.side==='A'?'b':'a')).getAttribute('data-speaking'),'false');
+    await page.screenshot({path:path.join(output,fixture.shot)});
+  }
+  app.runtime.runner.active=false;app.runtime.runner.stop();app.runtime.emit();
+  await page.waitForFunction(()=>document.getElementById('avatar-a').dataset.expression==='neutral'&&document.getElementById('avatar-b').dataset.expression==='neutral');
+  const reset=await page.evaluate(async()=>{
+    const host=document.createElement('div');host.style.cssText='position:fixed;left:-1500px;top:0';document.body.append(host);
+    const renderer=await window.AvatarRenderers.live2d(host,{pack:'/avatar/live2d/ds-whale-girl/c_0120.model3.json',performanceProfile:'whale',display:{charHeight:150}});
+    try{
+      renderer.setPose({yaw:0,pitch:0,roll:0,gazeX:0,gazeY:0});renderer.playEmotion('neutral');renderer.frame(1,0);
+      const values=()=>Array.from(renderer.__debugParams.values),before=values();
+      renderer.playEmotion('teasing');renderer.frame(1.1,0);const during=values(),selection=renderer.getPerformance();
+      renderer.playEmotion('neutral');renderer.frame(1.2,0);const after=values();
+      const controlled=new Set(['ParamAngleX','ParamAngleY','ParamAngleZ','ParamEyeBallX','ParamEyeBallY','ParamBreath','ParamEyeLOpen','ParamEyeROpen','ParamMouthOpenY']);
+      const ids=Array.from(renderer.__debugParams.ids),changed=ids.map((id,i)=>({id,i})).filter(({id,i})=>!controlled.has(id)&&Math.abs(during[i]-before[i])>.05);
+      return {selection,changed:changed.map(({id,i})=>({id,before:before[i],during:during[i],after:after[i]}))};
+    }finally{renderer.dispose();host.remove();}
+  });
+  assert.equal(reset.selection.asset,'调皮');assert.ok(reset.selection.parameters>0);assert.ok(reset.changed.length>0,'表情必须实际改变模型参数');
+  assert.ok(reset.changed.every(row=>Math.abs(row.after-row.before)<.05),'回到自然表情要清掉上一表情 '+JSON.stringify(reset.changed));
   assert.deepEqual(errors,[]);
   await writeFile(path.join(output,'scene-check.json'),JSON.stringify({ok:true,result,errors},null,2));
   console.log(JSON.stringify({ok:true,result,errors},null,2));
